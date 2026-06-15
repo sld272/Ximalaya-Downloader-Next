@@ -1,0 +1,84 @@
+# ===== 项目私有（不入库）=====
+# 设计稿、逆向资料等仅本地保留的内容
+.local/
+
+# ===== 下载产物与运行时数据 =====
+download/
+downloads/
+output/
+# 未完成的分段下载临时文件
+*.part
+
+# 任务库 / 历史（SQLite，运行时生成）
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 日志
+*.log
+logs/
+
+# ===== 本地配置与敏感信息 =====
+# 用户配置默认存放在系统用户目录，仓库内不应包含真实凭据
+# 旧版本地配置（含 cookie）
+config.json
+.env
+.env.*
+!.env.example
+secrets.*
+*.secret
+.secrets/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 打包与分发
+build/
+dist/
+wheels/
+*.egg
+*.egg-info/
+.eggs/
+.installed.cfg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# 测试与类型检查缓存
+.pytest_cache/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ===== PyInstaller（打包单文件可执行程序）=====
+*.manifest
+*.spec
+
+# ===== Node（签名运行时依赖）=====
+# 注意：assets/ 下随包发布的脚本资源应当入库，这里只忽略依赖目录
+node_modules/
+
+# ===== 编辑器 / 操作系统 =====
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
