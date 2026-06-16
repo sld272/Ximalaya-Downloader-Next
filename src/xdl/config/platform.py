@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+"""与平台强相关的数据化配置（见 docs/architecture.md §9）。
+
+这里集中存放最易随平台变动的常量：接口地址、UA、解码置换表/密钥、
+注入页面的脚本等。平台一变，原则上只改这个文件 + 解码适配器。
+"""
+
+BASE = "https://www.ximalaya.com"
+HOME_URL = BASE + "/"
+SOUND_URL = BASE + "/sound/{track_id}"
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
+REFERER = BASE + "/"
+
+# 让无头 Chromium 允许无手势自动播放，页面才会自动发出 baseInfo 请求
+BROWSER_ARGS = ["--autoplay-policy=no-user-gesture-required", "--mute-audio"]
+
+# ---- www2/mweb2 音频 URL 解密所需的置换表与密钥 ----
+PERMUTATION_TABLE_O = [
+    183, 174, 108, 16, 131, 159, 250, 5, 239, 110, 193, 202, 153, 137, 251, 176,
+    119, 150, 47, 204, 97, 237, 1, 71, 177, 42, 88, 218, 166, 82, 87, 94,
+    14, 195, 69, 127, 215, 240, 225, 197, 238, 142, 123, 44, 219, 50, 190, 29,
+    181, 186, 169, 98, 139, 185, 152, 13, 141, 76, 6, 157, 200, 132, 182, 49,
+    20, 116, 136, 43, 155, 194, 101, 231, 162, 242, 151, 213, 53, 60, 26, 134,
+    211, 56, 28, 223, 107, 161, 199, 15, 229, 61, 96, 41, 66, 158, 254, 21,
+    165, 253, 103, 89, 3, 168, 40, 246, 81, 95, 58, 31, 172, 78, 99, 45,
+    148, 187, 222, 124, 55, 203, 235, 64, 68, 149, 180, 35, 113, 207, 118, 111,
+    91, 38, 247, 214, 7, 212, 209, 189, 241, 18, 115, 173, 25, 236, 121, 249,
+    75, 57, 216, 10, 175, 112, 234, 164, 70, 206, 198, 255, 140, 230, 12, 32,
+    83, 46, 245, 0, 62, 227, 72, 191, 156, 138, 248, 114, 220, 90, 84, 170,
+    128, 19, 24, 122, 146, 80, 39, 37, 8, 34, 22, 11, 93, 130, 63, 154,
+    244, 160, 144, 79, 23, 133, 92, 54, 102, 210, 65, 67, 27, 196, 201, 106,
+    143, 52, 74, 100, 217, 179, 48, 233, 126, 117, 184, 226, 85, 171, 167, 86,
+    2, 147, 17, 135, 228, 252, 105, 30, 192, 129, 178, 120, 36, 145, 51, 163,
+    77, 205, 73, 4, 188, 125, 232, 33, 243, 109, 224, 104, 208, 221, 59, 9,
+]
+
+XOR_KEY_A = [
+    204, 53, 135, 197, 39, 73, 58, 160, 79, 24, 12, 83, 180, 250, 101, 60,
+    206, 30, 10, 227, 36, 95, 161, 16, 135, 150, 235, 116, 242, 116, 165, 171,
+]
+
+# 注入页面（在任何页面脚本前）的钩子：patch XHR.prototype，
+# 截获 baseInfo 的成功响应（含 playUrlList）到 window.__xmcap。
+INIT_HOOK_JS = r"""
+(() => {
+  if (window.__xmHooked) return;
+  window.__xmHooked = true;
+  window.__xmcap = null;
+  window.__xmerr = null;
+  const P = XMLHttpRequest.prototype;
+  const oOpen = P.open, oSend = P.send;
+  P.open = function(m, u){ this.__u = u; return oOpen.apply(this, arguments); };
+  P.send = function(){
+    this.addEventListener('load', () => {
+      try {
+        const u = this.__u || '';
+        if (u.indexOf('baseInfo') === -1) return;
+        const b = JSON.parse(this.responseText);
+        const ti = b && (b.trackInfo || (b.data && b.data.trackInfo));
+        if (ti && ti.playUrlList) window.__xmcap = ti;
+        else window.__xmerr = { ret: b && b.ret, msg: b && b.msg };
+      } catch (e) {}
+    });
+    return oSend.apply(this, arguments);
+  };
+})();
+"""
+
+# 自动播放被拦时的兜底：尝试点击页面播放键以触发 baseInfo。
+TRIGGER_PLAY_JS = r"""
+() => {
+  for (const el of document.querySelectorAll('button,div[role="button"],span,i,svg,a')) {
+    const hint = (el.getAttribute('aria-label')||'') + (el.getAttribute('title')||'')
+      + (el.className && el.className.baseVal!==undefined ? el.className.baseVal : (el.className||''));
+    if (/play|播放/i.test(hint)) { try { el.click(); } catch(e) {} }
+  }
+}
+"""

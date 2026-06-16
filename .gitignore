@@ -82,3 +82,12 @@ node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Agent
+CLAUDE.md
+AGENTS.md
+# 登录态
+xmly_auth.json
+
+# 早期原型，不纳入版本库
+download.py

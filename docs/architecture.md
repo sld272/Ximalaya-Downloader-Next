@@ -128,6 +128,8 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 
 降级与健康度由一个组合实现统一处理，用例层只依赖 `SignProvider` 抽象，不感知具体用了哪种实现，未来也可新增实现接到链上。无头浏览器属较重依赖，按需安装而非强制打包。
 
+> **MVP 现状（与上文设想的偏差）**：当前未单独实现 `SignProvider`，而是采用「**让页面自己签名**」的方案——`PlaywrightSource` 加载已登录页面，由页面内的 `du_web_sdk` 自动生成 `xm-sign` 并发出 `baseInfo` 请求，适配器注入 `XHR` 钩子截获其成功响应。签名逻辑因此被隐含在音源适配器内。后续实现本地签名（Node 补环境 / 纯算）时，再把 `SignProvider` 端口抽出、接入降级链，`PlaywrightSource` 退化为兜底实现。
+
 ### 7.2 在线音源
 
 `XimalayaWebSource` 实现 `Source`：构造请求 → 附加鉴权与必要头部 → 经 `HttpTransport` 与 `RateLimiter` 发出 → 把响应解析为领域的 `Track` / `Album` → 用注入的 `Decoder` 处理音频地址 → 对外返回可直接使用的结果。音质在领域层协商，请求音质缺失时回退。

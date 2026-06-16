@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+"""装配根（依赖注入，见 docs/architecture.md §1、§3）。
+
+按配置把适配器接到端口上，组装出供前端调用的门面。
+未来要替换实现（如新增本地签名、换音源），只改这里。
+"""
+from __future__ import annotations
+
+from .settings import Settings
+from .adapters import Www2Decoder, FileCookieJar, FileSink, PlaywrightSource
+from .application import Facade
+
+
+def build_facade(settings: Settings | None = None) -> Facade:
+    settings = settings or Settings()
+
+    cookiejar = FileCookieJar(settings.auth_path)
+    decoder = Www2Decoder()
+    source = PlaywrightSource(cookiejar, decoder, resolve_timeout=settings.resolve_timeout)
+    sink = FileSink(http_timeout=settings.http_timeout)
+
+    return Facade(source, sink, settings)
