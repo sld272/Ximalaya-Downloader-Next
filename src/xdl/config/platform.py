@@ -8,6 +8,13 @@
 BASE = "https://www.ximalaya.com"
 HOME_URL = BASE + "/"
 SOUND_URL = BASE + "/sound/{track_id}"
+ALBUM_URL = BASE + "/album/{album_id}"
+
+# 专辑曲目清单接口。注意用「非 v1」版：它免签名、可匿名翻全部页（每页 30 条）；
+# 而 /revision/album/v1/getTracksList 反而要 webtk 签名且对自动化环境做风控
+# （返回「当前环境异常」）。本接口仅给曲目元信息（id/标题/序号），不含 playUrl。
+TRACKS_LIST_URL = BASE + "/revision/album/getTracksList"
+TRACKS_PAGE_SIZE = 30   # 接口固定每页 30 条（传 pageSize 无效）
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")

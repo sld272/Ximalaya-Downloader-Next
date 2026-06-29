@@ -6,9 +6,9 @@
 """
 from __future__ import annotations
 
-from ..domain import Quality
+from ..domain import Quality, parse_range
 from ..settings import Settings
-from .usecases import DownloadTrackUseCase
+from .usecases import DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult
 
 
 class Facade:
@@ -33,3 +33,17 @@ class Facade:
         usecase = DownloadTrackUseCase(self._source, self._sink,
                                        self._settings.download_dir)
         return usecase.execute(target, q, reporter)
+
+    def download_album(self, target: str, quality: str | None = None,
+                       range_: str | None = None, reporter=None) -> AlbumResult:
+        """顺序批量下载专辑，返回下载汇总。range_ 形如 '1-20' / '5-' / '-10' / '7'。"""
+        q = Quality(quality or self._settings.default_quality)
+        start, end = parse_range(range_)
+        usecase = DownloadAlbumUseCase(self._source, self._sink,
+                                       self._settings.download_dir)
+        # 全程复用一个浏览器会话（逐集导航复用，避免每集冷启动）
+        self._source.open()
+        try:
+            return usecase.execute(target, q, start, end, reporter)
+        finally:
+            self._source.close()

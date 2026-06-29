@@ -29,6 +29,9 @@ class ConsoleProgress:
     def finish(self, path: str) -> None:
         print()
 
+    def note(self, msg: str) -> None:
+        print(msg)
+
 
 def _cmd_login(app: Facade, args) -> int:
     path = app.login()
@@ -43,6 +46,17 @@ def _cmd_track(app: Facade, args) -> int:
     return 0
 
 
+def _cmd_album(app: Facade, args) -> int:
+    result = app.download_album(args.target, quality=args.quality,
+                                range_=args.range, reporter=ConsoleProgress())
+    print("\n" + result.summary())
+    if result.failed:
+        print("失败明细：")
+        for at, err in result.failed:
+            print(f"  [{at.index}] {at.title} — {err}")
+    return 1 if result.failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="xdl", description="喜马拉雅音频下载器")
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
@@ -54,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_track.add_argument("target", help="音频链接或 trackId")
     p_track.add_argument("--quality", choices=["high", "standard", "low"],
                          help="音质（默认 standard，缺失时自动回退）")
+
+    p_album = sub.add_parser("album", help="顺序批量下载整张专辑")
+    p_album.add_argument("target", help="专辑链接或 albumId")
+    p_album.add_argument("--quality", choices=["high", "standard", "low"],
+                         help="音质（默认 standard，缺失时自动回退）")
+    p_album.add_argument("--range", dest="range", metavar="区间",
+                         help="下载区间，按专辑内序号：1-20 / 5- / -10 / 7（默认全部）")
 
     return parser
 
@@ -67,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         settings.download_dir = args.download_dir
     app = Facade.from_config(settings)
 
-    handlers = {"login": _cmd_login, "track": _cmd_track}
+    handlers = {"login": _cmd_login, "track": _cmd_track, "album": _cmd_album}
     try:
         return handlers[args.command](app, args)
     except XdlError as e:

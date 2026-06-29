@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ..domain import Track
+from ..domain import Track, Album
 
 
 @runtime_checkable
@@ -20,8 +20,14 @@ class Decoder(Protocol):
 
 @runtime_checkable
 class Source(Protocol):
-    """音源：获取单曲（后续扩展专辑 / 搜索）。"""
+    """音源：获取单曲与专辑（后续扩展搜索）。"""
     def get_track(self, track_id: str) -> Track: ...
+    def get_album(self, album_id: str) -> Album: ...
+
+    # 批量会话：open/close 之间复用同一底层连接（如长驻浏览器），
+    # 避免逐曲重复建链。无状态实现可空实现。
+    def open(self) -> None: ...
+    def close(self) -> None: ...
 
 
 @runtime_checkable
@@ -43,3 +49,4 @@ class ProgressReporter(Protocol):
     def start(self, title: str, total: int) -> None: ...
     def update(self, done: int, total: int) -> None: ...
     def finish(self, path: str) -> None: ...
+    def note(self, msg: str) -> None: ...      # 批量场景的逐条说明（专辑进度/跳过/失败等）
