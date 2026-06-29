@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from ..domain import Quality, parse_range
 from ..settings import Settings
-from .usecases import DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult
+from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
+                       RetryPolicy)
 
 
 class Facade:
@@ -22,6 +23,13 @@ class Facade:
         from ..composition import build_facade
         return build_facade(settings)
 
+    def _retry_policy(self) -> RetryPolicy:
+        s = self._settings
+        return RetryPolicy(max_attempts=s.max_attempts,
+                           backoff_base=s.retry_backoff_base,
+                           cooldown=s.cooldown,
+                           global_rounds=s.global_retry_rounds)
+
     def login(self) -> str:
         """打开浏览器登录并保存会话，返回保存路径。"""
         return self._source.interactive_login()
@@ -31,7 +39,8 @@ class Facade:
         """下载单个音频，返回落盘路径。"""
         q = Quality(quality or self._settings.default_quality)
         usecase = DownloadTrackUseCase(self._source, self._sink,
-                                       self._settings.download_dir)
+                                       self._settings.download_dir,
+                                       retry=self._retry_policy())
         return usecase.execute(target, q, reporter)
 
     def download_album(self, target: str, quality: str | None = None,
@@ -41,7 +50,8 @@ class Facade:
         start, end = parse_range(range_)
         usecase = DownloadAlbumUseCase(self._source, self._sink,
                                        self._settings.download_dir,
-                                       request_interval=self._settings.request_interval)
+                                       request_interval=self._settings.request_interval,
+                                       retry=self._retry_policy())
         # 全程复用一个浏览器会话（逐集导航复用，避免每集冷启动）
         self._source.open()
         try:

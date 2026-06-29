@@ -32,6 +32,12 @@ class Settings:
     # 克制的请求策略：逐集解析之间的随机间隔（秒）
     request_interval: tuple[float, float] = (1.0, 3.0)
 
+    # 错误分级退避重试（见 errors.py / 架构 §8.3）
+    max_attempts: int = 3              # 单任务即时重试上限
+    retry_backoff_base: float = 1.5    # 网络/签名类退避基数（秒）
+    cooldown: float = 30.0             # 限流(1001)类冷却（秒）
+    global_retry_rounds: int = 2       # 失败收尾轮数
+
     def __post_init__(self):
         if not self.chrome_profile_dir:
             self.chrome_profile_dir = os.path.join(_xdl_home(), "chrome-profile")
