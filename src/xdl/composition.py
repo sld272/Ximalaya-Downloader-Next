@@ -7,16 +7,22 @@
 from __future__ import annotations
 
 from .settings import Settings
-from .adapters import Www2Decoder, FileCookieJar, FileSink, PlaywrightSource
+from .adapters import Www2Decoder, FileSink, ChromeSource
 from .application import Facade
 
 
 def build_facade(settings: Settings | None = None) -> Facade:
     settings = settings or Settings()
 
-    cookiejar = FileCookieJar(settings.auth_path)
     decoder = Www2Decoder()
-    source = PlaywrightSource(cookiejar, decoder, resolve_timeout=settings.resolve_timeout)
+    source = ChromeSource(
+        decoder,
+        chrome_path=settings.chrome_path,
+        profile_dir=settings.chrome_profile_dir,
+        port=settings.cdp_port,
+        resolve_timeout=settings.resolve_timeout,
+        headless=settings.chrome_headless,
+    )
     sink = FileSink(http_timeout=settings.http_timeout)
 
     return Facade(source, sink, settings)

@@ -35,7 +35,7 @@ class ConsoleProgress:
 
 def _cmd_login(app: Facade, args) -> int:
     path = app.login()
-    print(f"登录态已保存到 {path}")
+    print(f"登录态已保存到专用 Chrome 配置目录: {path}")
     return 0
 
 

@@ -128,7 +128,11 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 
 降级与健康度由一个组合实现统一处理，用例层只依赖 `SignProvider` 抽象，不感知具体用了哪种实现，未来也可新增实现接到链上。无头浏览器属较重依赖，按需安装而非强制打包。
 
-> **MVP 现状（与上文设想的偏差）**：当前未单独实现 `SignProvider`，而是采用「**让页面自己签名**」的方案——`PlaywrightSource` 加载已登录页面，由页面内的 `du_web_sdk` 自动生成 `xm-sign` 并发出 `baseInfo` 请求，适配器注入 `XHR` 钩子截获其成功响应。签名逻辑因此被隐含在音源适配器内。后续实现本地签名（Node 补环境 / 纯算）时，再把 `SignProvider` 端口抽出、接入降级链，`PlaywrightSource` 退化为兜底实现。
+> **MVP 现状（与上文设想的偏差）**：当前未单独实现 `SignProvider`，而是采用「**让页面自己签名**」的方案——`ChromeSource` 加载已登录页面，由页面内的 `du_web_sdk` 自动生成 `xm-sign` 并发出 `baseInfo` 请求，适配器注入 `XHR` 钩子截获其成功响应。签名逻辑因此被隐含在音源适配器内。后续实现本地签名（Node 补环境 / 纯算）时，再把 `SignProvider` 端口抽出、接入降级链。
+>
+> **反自动化风控（重要）**：平台 `du_web_sdk` 现对 `baseInfo` 加了**自动化环境指纹检测**——由 Playwright/CDP **直接 `launch` 的 Chromium**（无论有头/无头、是否 stealth 伪装）都会被判为机器人，`baseInfo` 返回 `1001`/`3005`「系统繁忙」。实测对照：正常启动的真实 Chrome 能 `ret 0`，Playwright 启动的 Chrome 恒为 `1001`。因此 `ChromeSource` **不让 Playwright 启动浏览器**，而是自己以「干净方式」启动**真实 Chrome**（仅 `--remote-debugging-port`，不带 `--enable-automation` 等自动化标志），再用 `connect_over_cdp` 接管。登录态持久化在**专用 Chrome 用户配置目录**（取代早期 storage_state `auth.json`）。无头真实 Chrome（`--headless=new`）已验证同样可过风控。
+>
+> 同理，频率过快也会触发 `1001`，故专辑逐集解析之间加随机间隔（`request_interval`）。
 
 ### 7.2 在线音源
 

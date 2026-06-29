@@ -1,30 +1,30 @@
 # -*- coding: utf-8 -*-
-"""在线音源适配器（实现 Source 端口，见 docs/architecture.md §7.2）。
+"""在线音源适配器（实现 Source 端口，见 docs/architecture.md §7.1/§7.2）。
 
-策略：用 Playwright 加载已登录页面，让页面自身发出带 xm-sign 的 baseInfo
-请求并截获其成功响应——因此无需自行复现签名（签名由页面 du_web_sdk 生成）。
-拿到 playUrlList 后用注入的 Decoder 解码为可直接下载的地址。
+单曲解析走「让页面自己签名」：加载已登录的 /sound 页，页面内 du_web_sdk 生成
+xm-sign 并发出 baseInfo 请求，注入的 XHR 钩子截获其成功响应（含 playUrlList）。
 
-专辑清单同理走「页面自己签名」：在已登录的专辑页内同源 fetch getTracksList
-逐页取全集（未登录仅能取到第一页）。
+关键（与最初 MVP 的重大差异）：平台 du_web_sdk 现对 baseInfo 加了**自动化环境
+风控**——Playwright 直接 launch 的 Chromium（无论有头/无头、是否 stealth）都会被
+判为机器人，返回 1001/3005「系统繁忙」。实测：正常启动的真实 Chrome 能 ret 0。
+因此这里**自己以干净方式启动真实 Chrome**（仅开调试端口、不带自动化标志），再用
+Playwright `connect_over_cdp` 接管。登录态持久化在专用 Chrome 用户配置目录里
+（取代早期的 storage_state auth.json）。
 
-会话复用：open()/close() 之间长驻同一浏览器/上下文/页面，专辑下载逐集导航
-复用它，避免每集冷启动浏览器（架构 §7.1「进程长驻、反复复用」）。单曲场景
-不显式 open 时，get_track/get_album 自行临时起停浏览器，行为与此前一致。
-
-注：签名能力本应抽象为 SignProvider 端口（架构 §7.1），但 MVP 采用「让页面
-自己签名」的方案，签名被隐含在本适配器内。后续若实现本地签名（Node/纯算），
-再把 SignProvider 抽出并接入降级链。
+专辑清单不经浏览器：走免签的「非 v1」getTracksList 接口纯 HTTP 翻页。
 """
 from __future__ import annotations
 
+import os
+import socket
+import subprocess
 import time
 
 import requests
 
 from ..config import platform
 from ..domain import Track, PlayUrl, Album, AlbumTrack
-from ..errors import ApiError, AuthError, NetworkError
+from ..errors import ApiError, AuthError, NetworkError, ConfigError
 from ..ports import Decoder
 
 # 这些 ret 码表示无权访问/地区限制等鉴权类问题
@@ -33,11 +33,24 @@ _LIST_TIMEOUT = 30        # 曲目清单 HTTP 超时（秒）
 _MAX_PAGES = 2000         # 翻页安全上限
 
 
-class PlaywrightSource:
-    def __init__(self, cookiejar, decoder: Decoder, resolve_timeout: int = 40):
-        self._jar = cookiejar
+def _port_alive(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+class ChromeSource:
+    """经 CDP 接管真实 Chrome 解析单曲；HTTP 取专辑清单。"""
+
+    def __init__(self, decoder: Decoder, chrome_path: str, profile_dir: str,
+                 port: int = 9222, resolve_timeout: int = 40, headless: bool = True):
         self._decoder = decoder
+        self._chrome_path = chrome_path
+        self._profile_dir = profile_dir
+        self._port = port
         self._timeout = resolve_timeout
+        self._headless = headless
+        self._proc = None
         self._pw = None
         self._browser = None
         self._context = None
@@ -45,34 +58,45 @@ class PlaywrightSource:
 
     # ---- 会话生命周期（Source 端口） ----
     def open(self) -> None:
-        """长驻一个无头浏览器会话，供批量解析复用。"""
         if self._page is not None:
             return
+        self._require_chrome()
+        os.makedirs(self._profile_dir, exist_ok=True)
+        if not _port_alive(self._port):
+            self._launch_chrome(headless=self._headless)
         from playwright.sync_api import sync_playwright
-
-        storage = self._jar.state_path()
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=True, args=platform.BROWSER_ARGS)
-        self._context = self._browser.new_context(storage_state=storage, user_agent=platform.UA)
+        try:
+            self._browser = self._pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{self._port}")
+        except Exception as e:
+            self.close()
+            raise NetworkError(f"接管 Chrome 失败（端口 {self._port}）: {e}") from e
+        self._context = (self._browser.contexts[0] if self._browser.contexts
+                         else self._browser.new_context())
         self._context.add_init_script(platform.INIT_HOOK_JS)
-        self._page = self._context.new_page()
-        # 匿名访问时先访问首页预热，让服务端下发匿名 Cookie（反爬/设备标识）
-        if not storage:
-            self._page.goto(platform.HOME_URL, wait_until="domcontentloaded")
-            self._page.wait_for_timeout(2500)
+        self._page = (self._context.pages[0] if self._context.pages
+                      else self._context.new_page())
 
     def close(self) -> None:
-        for obj, meth in ((self._context, "close"), (self._browser, "close"),
-                          (self._pw, "stop")):
+        try:
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:
+            pass
+        if self._proc is not None:
             try:
-                if obj is not None:
-                    getattr(obj, meth)()
+                self._proc.terminate()
+                self._proc.wait(timeout=5)
             except Exception:
-                pass
-        self._pw = self._browser = self._context = self._page = None
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+        self._proc = self._pw = self._browser = self._context = self._page = None
 
     def _session(self):
-        """返回 (page, owns)：owns 表示本次调用临时开启、用毕需关闭。"""
+        """返回 (page, owns)：owns 表示本次临时开启、用毕需关闭。"""
         owns = self._page is None
         if owns:
             self.open()
@@ -159,22 +183,50 @@ class PlaywrightSource:
 
     # ---- 适配器特有：交互式登录 ----
     def interactive_login(self) -> str:
-        from playwright.sync_api import sync_playwright
+        """以有头真实 Chrome 打开首页供用户登录；会话持久化在专用配置目录。"""
+        self._require_chrome()
+        os.makedirs(self._profile_dir, exist_ok=True)
+        print("即将打开 Chrome，请在其中完成登录（扫码或账号密码）。")
+        args = [self._chrome_path, f"--user-data-dir={self._profile_dir}",
+                *platform.CHROME_LAUNCH_ARGS, platform.HOME_URL]
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            input(">>> 登录完成后回到这里按回车结束（会话已存入专用 Chrome 配置）: ")
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        return self._profile_dir
 
-        self._jar.ensure_dir()
-        dest = self._jar.location()
-        print("即将打开浏览器，请完成登录（扫码或账号密码）。")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context(user_agent=platform.UA)
-            page = context.new_page()
-            page.goto(platform.HOME_URL, wait_until="domcontentloaded")
-            input(">>> 登录完成后回到这里按回车保存登录态: ")
-            context.storage_state(path=dest)
-            browser.close()
-        return dest
+    # ---- 内部 ----
+    def _require_chrome(self) -> None:
+        if not self._chrome_path or not os.path.exists(self._chrome_path):
+            raise ConfigError(
+                f"未找到 Chrome 可执行文件: {self._chrome_path!r}。"
+                "请安装 Google Chrome，或在配置中指定 chrome_path。")
 
-    # ---- 内部：在给定 page 上导航并截获 baseInfo ----
+    def _launch_chrome(self, headless: bool) -> None:
+        args = [self._chrome_path,
+                f"--remote-debugging-port={self._port}",
+                f"--user-data-dir={self._profile_dir}",
+                *platform.CHROME_LAUNCH_ARGS]
+        if headless:
+            args.append("--headless=new")
+        self._proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+        for _ in range(75):                 # 最多等 ~15s
+            if _port_alive(self._port):
+                return
+            time.sleep(0.2)
+        self.close()
+        raise NetworkError(f"Chrome 调试端口 {self._port} 未就绪（启动超时）。")
+
     def _capture_base_info(self, page, track_id: str):
         # 导航会重跑 init 钩子，自动把 window.__xmcap/__xmerr 重置为 null
         page.goto(platform.SOUND_URL.format(track_id=track_id),

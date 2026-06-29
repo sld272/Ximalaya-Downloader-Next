@@ -37,13 +37,6 @@ class MediaSink(Protocol):
 
 
 @runtime_checkable
-class CookieJar(Protocol):
-    """登录会话（storage_state）的读写持久化。"""
-    def state_path(self) -> str | None: ...   # 存在则返回路径，否则 None
-    def location(self) -> str: ...            # 用于写入的目标路径
-
-
-@runtime_checkable
 class ProgressReporter(Protocol):
     """向前端回报进度（由前端实现）。"""
     def start(self, title: str, total: int) -> None: ...

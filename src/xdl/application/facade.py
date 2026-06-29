@@ -40,7 +40,8 @@ class Facade:
         q = Quality(quality or self._settings.default_quality)
         start, end = parse_range(range_)
         usecase = DownloadAlbumUseCase(self._source, self._sink,
-                                       self._settings.download_dir)
+                                       self._settings.download_dir,
+                                       request_interval=self._settings.request_interval)
         # 全程复用一个浏览器会话（逐集导航复用，避免每集冷启动）
         self._source.open()
         try:
