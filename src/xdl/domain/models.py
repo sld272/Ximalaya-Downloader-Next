@@ -11,27 +11,37 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+# 音质类型形如「编码_码率」（如 M4A_64 / MP3_64 / MP3_32 / M4A_24 / AAC_24）。
+# 同码率时编码优先级：AAC/M4A 高于 MP3（同码率 AAC 音质略优）。不识别的编码记 0。
+_CODEC_RANK = {"M4A": 2, "AAC": 2, "MP3": 1}
+
+
+def _type_score(t: str) -> tuple[int, int]:
+    """把音质类型解析为可比较的 (码率, 编码优先级)；无法解析时码率记 0。"""
+    parts = (t or "").split("_")
+    bitrate = int(parts[-1]) if len(parts) >= 2 and parts[-1].isdigit() else 0
+    codec_rank = _CODEC_RANK.get(parts[0].upper(), 0) if parts else 0
+    return bitrate, codec_rank
+
+
 class Quality(Enum):
-    """音质等级，含「降级协商」：请求音质不可用时按偏好顺序回退。"""
+    """音质等级。按平台实际返回的类型「编码_码率」排序后选择，对未来新增类型自适应：
+    high=最高档（同码率取 AAC），low=最低档，standard=次优档（兼顾质量与体积）。"""
     HIGH = "high"
     STANDARD = "standard"
     LOW = "low"
 
-    @property
-    def _preference(self) -> list[str]:
-        # 平台音质类型按各等级的偏好排序
-        return {
-            Quality.HIGH: ["M4A_128", "MP3_64", "AI_128", "MP3_32"],
-            Quality.STANDARD: ["MP3_64", "M4A_128", "AI_128", "MP3_32"],
-            Quality.LOW: ["MP3_32", "MP3_64", "AI_128", "M4A_128"],
-        }[self]
-
     def negotiate(self, available_types: list[str]) -> str | None:
-        """在可用音质类型中按偏好挑选；都不匹配则取第一个可用。"""
-        for t in self._preference:
-            if t in available_types:
-                return t
-        return available_types[0] if available_types else None
+        """在可用音质类型中按本档位选一个；无可用时返回 None。"""
+        types = [t for t in available_types if t]
+        if not types:
+            return None
+        ranked = sorted(types, key=_type_score, reverse=True)   # 最优在前
+        if self is Quality.HIGH:
+            return ranked[0]
+        if self is Quality.LOW:
+            return ranked[-1]
+        return ranked[1] if len(ranked) >= 2 else ranked[0]     # STANDARD：次优档
 
 
 @dataclass

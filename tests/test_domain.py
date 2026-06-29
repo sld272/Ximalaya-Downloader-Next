@@ -6,10 +6,16 @@ from xdl.domain import (Quality, PlayUrl, Track, Album, AlbumTrack, NamingPolicy
                         parse_track_id, parse_album_id, parse_range)
 
 
-def test_quality_negotiation_prefers_then_falls_back():
-    # STANDARD 偏好 MP3_64；不可用时回退
-    assert Quality.STANDARD.negotiate(["M4A_128", "MP3_64"]) == "MP3_64"
-    assert Quality.STANDARD.negotiate(["M4A_128", "MP3_32"]) == "M4A_128"
+def test_quality_negotiation_by_bitrate_and_codec():
+    # 真实付费内容的档位：high=M4A_64(同码率取AAC), standard=MP3_64(次优), low=M4A_24(最低)
+    real = ["M4A_64", "MP3_64", "MP3_32", "M4A_24"]
+    assert Quality.HIGH.negotiate(real) == "M4A_64"
+    assert Quality.STANDARD.negotiate(real) == "MP3_64"
+    assert Quality.LOW.negotiate(real) == "M4A_24"
+    # 码率优先于编码：128 高于 64，不因编码降级
+    assert Quality.HIGH.negotiate(["MP3_64", "M4A_128"]) == "M4A_128"
+    assert Quality.LOW.negotiate(["MP3_64", "M4A_128"]) == "MP3_64"
+    # 单条 / 空
     assert Quality.HIGH.negotiate(["MP3_32"]) == "MP3_32"
     assert Quality.STANDARD.negotiate([]) is None
 
