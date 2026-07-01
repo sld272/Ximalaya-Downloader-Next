@@ -132,7 +132,7 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 >
 > **反自动化风控（重要）**：平台 `du_web_sdk` 现对 `baseInfo` 加了**自动化环境指纹检测**——由 Playwright/CDP **直接 `launch` 的 Chromium**（无论有头/无头、是否 stealth 伪装）都会被判为机器人，`baseInfo` 返回 `1001`/`3005`「系统繁忙」。实测对照：正常启动的真实 Chrome 能 `ret 0`，Playwright 启动的 Chrome 恒为 `1001`。因此 `ChromeSource` **不让 Playwright 启动浏览器**，而是自己以「干净方式」启动**真实 Chrome**（仅 `--remote-debugging-port`，不带 `--enable-automation` 等自动化标志），再用 `connect_over_cdp` 接管。登录态持久化在**专用 Chrome 用户配置目录**（取代早期 storage_state `auth.json`）。无头真实 Chrome（`--headless=new`）已验证同样可过风控。
 >
-> 同理，频率过快也会触发 `1001`，故专辑逐集解析之间加随机间隔（`request_interval`）。
+> **并发**：`ChromeSource` 用 **async Playwright**，在共享上下文里按需开独立 page，多集可并发解析；并发上界由用例层信号量（`max_concurrency`，默认 4）限定。实测探针：K≤6 并发、十余集无冷却连打均**未触发** `1001`，单集解析稳态 ~1.2s，K=4 端到端约 **4x** 提速。频率风控的安全网仍是错误分级退避重试（撞 `1001` 则退避冷却）。公开门面保持同步签名，内部 `asyncio.run` 收口。
 
 ### 7.2 在线音源
 

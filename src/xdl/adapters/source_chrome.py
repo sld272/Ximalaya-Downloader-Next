@@ -4,17 +4,20 @@
 单曲解析走「让页面自己签名」：加载已登录的 /sound 页，页面内 du_web_sdk 生成
 xm-sign 并发出 baseInfo 请求，注入的 XHR 钩子截获其成功响应（含 playUrlList）。
 
-关键（与最初 MVP 的重大差异）：平台 du_web_sdk 现对 baseInfo 加了**自动化环境
+关键（与最初 MVP 的重大差异）：平台 du_web_sdk 对 baseInfo 加了**自动化环境
 风控**——Playwright 直接 launch 的 Chromium（无论有头/无头、是否 stealth）都会被
 判为机器人，返回 1001/3005「系统繁忙」。实测：正常启动的真实 Chrome 能 ret 0。
 因此这里**自己以干净方式启动真实 Chrome**（仅开调试端口、不带自动化标志），再用
-Playwright `connect_over_cdp` 接管。登录态持久化在专用 Chrome 用户配置目录里
-（取代早期的 storage_state auth.json）。
+Playwright `connect_over_cdp` 接管。登录态持久化在专用 Chrome 用户配置目录。
+
+并发：采用 async Playwright，每次解析在共享上下文里开一个独立 page，多集可并发
+解析（并发上界由用例层的信号量控制）。探测显示适度并发（K≤6）不触发频率风控。
 
 专辑清单不经浏览器：走免签的「非 v1」getTracksList 接口纯 HTTP 翻页。
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
@@ -27,10 +30,9 @@ from ..domain import Track, PlayUrl, Album, AlbumTrack
 from ..errors import ApiError, AuthError, NetworkError, ConfigError
 from ..ports import Decoder
 
-# 这些 ret 码表示无权访问/地区限制等鉴权类问题
-_AUTH_RETS = {3005, 927}
-_LIST_TIMEOUT = 30        # 曲目清单 HTTP 超时（秒）
-_MAX_PAGES = 2000         # 翻页安全上限
+_AUTH_RETS = {3005, 927}   # 无权访问/地区限制等鉴权类
+_LIST_TIMEOUT = 30
+_MAX_PAGES = 2000
 
 
 def _port_alive(port: int) -> bool:
@@ -40,7 +42,7 @@ def _port_alive(port: int) -> bool:
 
 
 class ChromeSource:
-    """经 CDP 接管真实 Chrome 解析单曲；HTTP 取专辑清单。"""
+    """经 CDP 接管真实 Chrome 解析单曲（async，可并发）；HTTP 取专辑清单。"""
 
     def __init__(self, decoder: Decoder, chrome_path: str, profile_dir: str,
                  port: int = 9222, resolve_timeout: int = 40, headless: bool = True):
@@ -53,35 +55,37 @@ class ChromeSource:
         self._proc = None
         self._pw = None
         self._browser = None
-        self._context = None
-        self._page = None
+        self._ctx = None
 
     # ---- 会话生命周期（Source 端口） ----
-    def open(self) -> None:
-        if self._page is not None:
+    async def open(self) -> None:
+        if self._ctx is not None:
             return
         self._require_chrome()
         os.makedirs(self._profile_dir, exist_ok=True)
         if not _port_alive(self._port):
             self._launch_chrome(headless=self._headless)
-        from playwright.sync_api import sync_playwright
-        self._pw = sync_playwright().start()
+        from playwright.async_api import async_playwright
+        self._pw = await async_playwright().start()
         try:
-            self._browser = self._pw.chromium.connect_over_cdp(
+            self._browser = await self._pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{self._port}")
         except Exception as e:
-            self.close()
+            await self.close()
             raise NetworkError(f"接管 Chrome 失败（端口 {self._port}）: {e}") from e
-        self._context = (self._browser.contexts[0] if self._browser.contexts
-                         else self._browser.new_context())
-        self._context.add_init_script(platform.INIT_HOOK_JS)
-        self._page = (self._context.pages[0] if self._context.pages
-                      else self._context.new_page())
+        self._ctx = (self._browser.contexts[0] if self._browser.contexts
+                     else await self._browser.new_context())
+        await self._ctx.add_init_script(platform.INIT_HOOK_JS)
 
-    def close(self) -> None:
+    async def close(self) -> None:
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        except Exception:
+            pass
         try:
             if self._pw is not None:
-                self._pw.stop()
+                await self._pw.stop()
         except Exception:
             pass
         if self._proc is not None:
@@ -93,56 +97,51 @@ class ChromeSource:
                     self._proc.kill()
                 except Exception:
                     pass
-        self._proc = self._pw = self._browser = self._context = self._page = None
+        self._proc = self._pw = self._browser = self._ctx = None
 
-    def _session(self):
-        """返回 (page, owns)：owns 表示本次临时开启、用毕需关闭。"""
-        owns = self._page is None
-        if owns:
-            self.open()
-        return self._page, owns
-
-    # ---- Source 端口：单曲 ----
-    def get_track(self, track_id: str) -> Track:
-        page, owns = self._session()
+    # ---- Source 端口：单曲（每次开独立 page，支持并发） ----
+    async def get_track(self, track_id: str) -> Track:
+        if self._ctx is None:
+            raise NetworkError("会话未打开，请先 await open()。")
+        page = await self._ctx.new_page()
         try:
-            node, last_err = self._capture_base_info(page, track_id)
-            if not node:
-                self._raise_for(last_err)
-
-            play_urls = []
-            for item in node.get("playUrlList") or []:
-                enc = item.get("url")
-                if not enc:
-                    continue
-                play_urls.append(PlayUrl(
-                    type=item.get("type", ""),
-                    url=self._decoder.decode(enc),
-                    file_size=item.get("fileSize", 0) or 0,
-                ))
-
-            return Track(
-                track_id=str(track_id),
-                title=node.get("title") or str(track_id),
-                play_urls=play_urls,
-                is_paid=bool(node.get("isPaid")),
-                is_authorized=bool(node.get("isAuthorized", True)),
-            )
+            node, last_err = await self._capture_base_info(page, track_id)
         finally:
-            if owns:
-                self.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
+        if not node:
+            self._raise_for(last_err)
 
-    # ---- Source 端口：专辑清单 ----
-    def get_album(self, album_id: str) -> Album:
-        """取专辑曲目清单。走免签的「非 v1」getTracksList 接口，纯 HTTP 翻页，
-        无需浏览器/登录（清单为公开信息；逐集 playUrl 仍在下载时经浏览器解析）。"""
-        album_id = str(album_id)
+        play_urls = []
+        for item in node.get("playUrlList") or []:
+            enc = item.get("url")
+            if not enc:
+                continue
+            play_urls.append(PlayUrl(
+                type=item.get("type", ""),
+                url=self._decoder.decode(enc),
+                file_size=item.get("fileSize", 0) or 0,
+            ))
+        return Track(
+            track_id=str(track_id),
+            title=node.get("title") or str(track_id),
+            play_urls=play_urls,
+            is_paid=bool(node.get("isPaid")),
+            is_authorized=bool(node.get("isAuthorized", True)),
+        )
+
+    # ---- Source 端口：专辑清单（纯 HTTP，放线程池不挡事件循环） ----
+    async def get_album(self, album_id: str) -> Album:
+        return await asyncio.to_thread(self._fetch_album, str(album_id))
+
+    def _fetch_album(self, album_id: str) -> Album:
         headers = {"User-Agent": platform.UA,
                    "Referer": platform.ALBUM_URL.format(album_id=album_id)}
         tracks: list[AlbumTrack] = []
         title: str | None = None
         total = 0
-
         for page_num in range(1, _MAX_PAGES + 1):
             try:
                 resp = requests.get(
@@ -153,11 +152,9 @@ class ChromeSource:
                 body = resp.json()
             except requests.RequestException as e:
                 raise NetworkError(f"获取专辑曲目清单失败: {e}") from e
-
             if body.get("ret") != 200 or not body.get("data"):
                 raise ApiError(f"获取专辑曲目清单失败（ret={body.get('ret')} "
                                f"msg={body.get('msg')}）。", ret=body.get("ret"))
-
             data = body["data"]
             total = int(data.get("trackTotalCount") or 0)
             batch = data.get("tracks") or []
@@ -174,16 +171,14 @@ class ChromeSource:
                     title = t["albumTitle"]
             if total and len(tracks) >= total:
                 break
-            time.sleep(0.3)   # 克制：翻页间略作停顿
-
+            time.sleep(0.3)
         if not tracks:
             raise ApiError("专辑无可下载曲目或不存在。")
         return Album(album_id=album_id, title=title or album_id,
                      total=total or len(tracks), tracks=tracks)
 
-    # ---- 适配器特有：交互式登录 ----
+    # ---- 适配器特有：交互式登录（同步，一次性） ----
     def interactive_login(self) -> str:
-        """以有头真实 Chrome 打开首页供用户登录；会话持久化在专用配置目录。"""
         self._require_chrome()
         os.makedirs(self._profile_dir, exist_ok=True)
         print("即将打开 Chrome，请在其中完成登录（扫码或账号密码）。")
@@ -220,30 +215,27 @@ class ChromeSource:
             args.append("--headless=new")
         self._proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL)
-        for _ in range(75):                 # 最多等 ~15s
+        for _ in range(75):
             if _port_alive(self._port):
                 return
             time.sleep(0.2)
-        self.close()
         raise NetworkError(f"Chrome 调试端口 {self._port} 未就绪（启动超时）。")
 
-    def _capture_base_info(self, page, track_id: str):
-        # 导航会重跑 init 钩子，自动把 window.__xmcap/__xmerr 重置为 null
-        page.goto(platform.SOUND_URL.format(track_id=track_id),
-                  wait_until="domcontentloaded")
-
+    async def _capture_base_info(self, page, track_id: str):
+        await page.goto(platform.SOUND_URL.format(track_id=track_id),
+                        wait_until="domcontentloaded")
         node = None
         last_err = None
         start = time.time()
         tried_click = False
         while time.time() - start < self._timeout:
-            node = page.evaluate("window.__xmcap")
+            node = await page.evaluate("window.__xmcap")
             if node:
                 break
-            last_err = page.evaluate("window.__xmerr")
-            page.wait_for_timeout(400)
+            last_err = await page.evaluate("window.__xmerr")
+            await page.wait_for_timeout(400)
             if not tried_click and time.time() - start > 3:
-                page.evaluate(platform.TRIGGER_PLAY_JS)   # 自动播放被拦时点一下
+                await page.evaluate(platform.TRIGGER_PLAY_JS)
                 tried_click = True
         return node, last_err
 

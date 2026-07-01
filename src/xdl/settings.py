@@ -29,8 +29,8 @@ class Settings:
     cdp_port: int = 9222            # Chrome 远程调试端口
     chrome_headless: bool = True    # 下载解析用无头真实 Chrome（登录始终有头）
 
-    # 克制的请求策略：逐集解析之间的随机间隔（秒）
-    request_interval: tuple[float, float] = (1.0, 3.0)
+    # 并发：专辑解析下载的并发上界（探测显示 K≤6 不触发频率风控，默认保守取 4）
+    max_concurrency: int = 4
 
     # 错误分级退避重试（见 errors.py / 架构 §8.3）
     max_attempts: int = 3              # 单任务即时重试上限
