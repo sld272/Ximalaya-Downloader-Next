@@ -2,12 +2,14 @@
 """用例层单测：错误分级退避重试 + 失败收尾轮 + 并发（用替身，零真实 I/O）。"""
 import asyncio
 import os
+import sqlite3
 
 import pytest
 
-from xdl.domain import Album, AlbumTrack, Track, PlayUrl, Quality
+from xdl.adapters import SqliteTaskStore
+from xdl.domain import Album, AlbumTrack, DownloadTask, Track, PlayUrl, Quality
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
-                                      RetryPolicy)
+                                      ResumeUseCase, RetryPolicy)
 from xdl.errors import NetworkError, AuthError, ApiError
 
 # 退避/冷却全置 0，测试不真正 sleep
@@ -19,7 +21,11 @@ def run(coro):
 
 
 class FakeSink:
+    def __init__(self):
+        self.writes = []
+
     def write(self, url, path, reporter):   # 同步，用例里经 to_thread 调用
+        self.writes.append((url, path))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "w").close()
 
@@ -76,6 +82,17 @@ def _one_track_album():
                  tracks=[AlbumTrack(track_id="1", title="第1集", index=1)])
 
 
+def _db_rows(path):
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM download_task ORDER BY album_index"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
 def test_album_recovery_round_salvages(tmp_path):
     src = FakeSource(_one_track_album(), behavior={
         "1": [NetworkError("1"), NetworkError("2"), NetworkError("3"), "ok"]})
@@ -115,3 +132,84 @@ def test_album_concurrent_all_downloaded(tmp_path):
     res = run(uc.execute("123", Quality.STANDARD))
     assert len(res.downloaded) == 10 and not res.failed and not res.skipped
     assert all(src.calls[str(i)] == 1 for i in range(1, 11))
+
+
+def test_album_store_marks_success_done(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album())
+        sink = FakeSink()
+        uc = DownloadAlbumUseCase(src, sink, str(tmp_path / "downloads"),
+                                  retry=FAST, store=store)
+        res = run(uc.execute("123", Quality.STANDARD))
+        assert len(res.downloaded) == 1 and not res.failed
+        rows = _db_rows(db)
+        assert [(r["state"], r["target_path"]) for r in rows] == [
+            ("done", res.downloaded[0])
+        ]
+        assert store.pending_tasks("123") == []
+    finally:
+        store.close()
+
+
+def test_album_store_records_failed_error(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={"1": [NetworkError("boom")]})
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=RetryPolicy(max_attempts=1, backoff_base=0,
+                                                    cooldown=0, global_rounds=0),
+                                  store=store)
+        res = run(uc.execute("123", Quality.STANDARD))
+        assert len(res.failed) == 1
+        rows = _db_rows(db)
+        assert rows[0]["state"] == "failed"
+        assert rows[0]["last_error_code"] == "network"
+        assert rows[0]["attempts"] == 1
+    finally:
+        store.close()
+
+
+def test_album_second_execute_skips_done_file_without_redownload(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album())
+        sink = FakeSink()
+        uc = DownloadAlbumUseCase(src, sink, str(tmp_path / "downloads"),
+                                  retry=FAST, store=store)
+        first = run(uc.execute("123", Quality.STANDARD))
+        second = run(uc.execute("123", Quality.STANDARD))
+        assert len(first.downloaded) == 1
+        assert len(second.skipped) == 1 and not second.downloaded
+        assert len(sink.writes) == 1
+        assert src.calls["1"] == 1
+    finally:
+        store.close()
+
+
+def test_resume_usecase_runs_pending_and_stale_tasks(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        store.save_album_meta("123", "专辑", 2)
+        tasks = store.upsert_pending([
+            DownloadTask("1", "123", "第1集", Quality.STANDARD.value, 1),
+            DownloadTask("2", "123", "第2集", Quality.STANDARD.value, 2),
+        ])
+        store.mark_downloading(tasks[0].id)
+
+        src = FakeSource()
+        sink = FakeSink()
+        uc = ResumeUseCase(src, sink, str(tmp_path / "downloads"), store,
+                           concurrency=2, retry=FAST)
+        results = run(uc.execute())
+        assert len(results) == 1
+        assert len(results[0].downloaded) == 2
+        assert not results[0].failed
+        assert store.pending_tasks("123") == []
+        assert [r["state"] for r in _db_rows(db)] == ["done", "done"]
+    finally:
+        store.close()

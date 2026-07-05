@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from .settings import Settings
-from .adapters import Www2Decoder, FileSink, ChromeSource
+from .adapters import Www2Decoder, FileSink, ChromeSource, SqliteTaskStore
 from .application import Facade
 
 
@@ -24,5 +24,6 @@ def build_facade(settings: Settings | None = None) -> Facade:
         headless=settings.chrome_headless,
     )
     sink = FileSink(http_timeout=settings.http_timeout)
+    store = SqliteTaskStore(settings.task_db_path)
 
-    return Facade(source, sink, settings)
+    return Facade(source, sink, settings, store=store)

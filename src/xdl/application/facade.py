@@ -11,14 +11,15 @@ import asyncio
 from ..domain import Quality, parse_range
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
-                       RetryPolicy)
+                       ResumeUseCase, RetryPolicy)
 
 
 class Facade:
-    def __init__(self, source, sink, settings: Settings):
+    def __init__(self, source, sink, settings: Settings, store=None):
         self._source = source
         self._sink = sink
         self._settings = settings
+        self._store = store
 
     @classmethod
     def from_config(cls, settings: Settings | None = None) -> "Facade":
@@ -46,6 +47,10 @@ class Facade:
         """并发批量下载专辑，返回下载汇总。range_ 形如 '1-20' / '5-' / '-10' / '7'。"""
         return asyncio.run(self._download_album(target, quality, range_, reporter))
 
+    def resume(self, reporter=None) -> list[AlbumResult]:
+        """继续任务库中未完成的专辑下载。"""
+        return asyncio.run(self._resume(reporter))
+
     # ---- 内部异步实现 ----
     async def _download_track(self, target, quality, reporter) -> str:
         q = Quality(quality or self._settings.default_quality)
@@ -64,10 +69,20 @@ class Facade:
         usecase = DownloadAlbumUseCase(self._source, self._sink,
                                        self._settings.download_dir,
                                        concurrency=self._settings.max_concurrency,
-                                       retry=self._retry_policy())
+                                       retry=self._retry_policy(),
+                                       store=self._store)
         # 全程复用一个 Chrome 会话（共享上下文里按需开 page 并发解析）
         await self._source.open()
         try:
             return await usecase.execute(target, q, start, end, reporter)
         finally:
             await self._source.close()
+
+    async def _resume(self, reporter) -> list[AlbumResult]:
+        if self._store is None:
+            return []
+        usecase = ResumeUseCase(self._source, self._sink,
+                                self._settings.download_dir, self._store,
+                                concurrency=self._settings.max_concurrency,
+                                retry=self._retry_policy())
+        return await usecase.execute(reporter)

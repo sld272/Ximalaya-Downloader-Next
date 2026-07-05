@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, TypeVar
 
-from ..domain import (Track, Album, AlbumTrack, Quality, NamingPolicy,
+from ..domain import (Track, Album, AlbumTrack, DownloadTask, Quality, NamingPolicy,
                       parse_track_id, parse_album_id)
 from ..errors import XdlError, AuthError, ApiError
-from ..ports import Source, MediaSink, ProgressReporter
+from ..ports import Source, MediaSink, ProgressReporter, TaskStore
 
 _EXTS = (".m4a", ".mp3")
 _T = TypeVar("_T")
@@ -105,6 +106,12 @@ class AlbumResult:
         return line
 
 
+@dataclass
+class _AlbumWorkItem:
+    track: AlbumTrack
+    task: DownloadTask | None = None
+
+
 class DownloadAlbumUseCase:
     """专辑有界并发批量下载：解析清单 → 并发解析 playUrl 并落盘 → 失败收尾轮。
 
@@ -113,12 +120,14 @@ class DownloadAlbumUseCase:
     """
 
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
-                 concurrency: int = 4, retry: RetryPolicy | None = None):
+                 concurrency: int = 4, retry: RetryPolicy | None = None,
+                 store: TaskStore | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
         self._concurrency = max(1, concurrency)
         self._retry = retry or RetryPolicy()
+        self._store = store
 
     async def execute(self, target: str, quality: Quality,
                       start: int | None = None, end: int | None = None,
@@ -138,58 +147,150 @@ class DownloadAlbumUseCase:
         width = len(str(album.total or len(album.tracks) or 1))
         total = album.total or len(album.tracks)
 
-        # 预筛已存在（同步、快，不占并发）
-        todo: list[AlbumTrack] = []
+        task_rows = await self._prepare_tasks(album, selected, quality, reporter)
+        task_by_track = ({t.track_id: t for t in task_rows}
+                         if task_rows is not None else None)
+
+        # 预筛已存在（同步、快，不占并发）；文件系统是完成态的最终真相。
+        work: list[_AlbumWorkItem] = []
         for at in selected:
+            existing = self._existing_path(album_dir, at, width)
+            task = task_by_track.get(at.track_id) if task_by_track is not None else None
+            if existing:
+                _note(reporter, f"[{at.index}/{total}] {at.title} — 已存在，跳过")
+                result.skipped.append(existing)
+                if task and task.id is not None:
+                    await self._store_call(reporter, self._store.mark_done,
+                                           task.id, existing)
+            else:
+                work.append(_AlbumWorkItem(at, task))
+
+        failures = await self._run_work_items(work, quality, album_dir, width,
+                                              total, reporter, result)
+        result.failed = [(item.track, str(e)) for item, e in failures]
+        return result
+
+    async def resume_tasks(self, album_id: str, album_title: str,
+                           tasks: list[DownloadTask], quality: Quality,
+                           total_known: int = 0,
+                           reporter: ProgressReporter | None = None) -> AlbumResult:
+        result = AlbumResult(album_title)
+        if not tasks:
+            return result
+        album_dir = os.path.join(self._download_dir, NamingPolicy.sanitize(album_title))
+        total = total_known or max((t.album_index for t in tasks), default=len(tasks))
+        width = len(str(total or len(tasks) or 1))
+
+        work: list[_AlbumWorkItem] = []
+        for task in tasks:
+            at = AlbumTrack(track_id=task.track_id, title=task.title,
+                            index=task.album_index)
             existing = self._existing_path(album_dir, at, width)
             if existing:
                 _note(reporter, f"[{at.index}/{total}] {at.title} — 已存在，跳过")
                 result.skipped.append(existing)
+                if task.id is not None:
+                    await self._store_call(reporter, self._store.mark_done,
+                                           task.id, existing)
             else:
-                todo.append(at)
+                work.append(_AlbumWorkItem(at, task))
 
-        _note(reporter, f"开始并发下载 {len(todo)} 集（并发 {self._concurrency}）")
-        failures = await self._run_batch(todo, quality, album_dir, width, total,
+        failures = await self._run_work_items(work, quality, album_dir, width,
+                                              total, reporter, result)
+        result.failed = [(item.track, str(e)) for item, e in failures]
+        return result
+
+    # ---- 内部 ----
+    async def _prepare_tasks(self, album: Album, selected: list[AlbumTrack],
+                             quality: Quality, reporter) -> list[DownloadTask] | None:
+        if self._store is None:
+            return None
+        tasks = [
+            DownloadTask(
+                track_id=at.track_id,
+                album_id=album.album_id,
+                title=at.title,
+                quality=quality.value,
+                album_index=at.index,
+            )
+            for at in selected
+        ]
+        await self._store_call(reporter, self._store.save_album_meta,
+                               album.album_id, album.title,
+                               album.total or len(album.tracks))
+        return await self._store_call(reporter, self._store.upsert_pending,
+                                      tasks, default=None)
+
+    async def _run_work_items(self, work: list[_AlbumWorkItem], quality: Quality,
+                              album_dir: str, width: int, total: int,
+                              reporter, result) -> list[tuple[_AlbumWorkItem, XdlError]]:
+        _note(reporter, f"开始并发下载 {len(work)} 集（并发 {self._concurrency}）")
+        failures = await self._run_batch(work, quality, album_dir, width, total,
                                          reporter, result)
 
-        # 失败收尾轮：跨轮间隔后统一重试「可重试」的残余失败项
+        # 失败收尾轮：跨轮间隔后统一重试「可重试」的残余失败项。
         for rnd in range(1, self._retry.global_rounds + 1):
-            retryable = [(at, e) for at, e in failures if e.retryable]
+            retryable = [(item, e) for item, e in failures if e.retryable]
             if not retryable:
                 break
             _note(reporter, f"== 失败收尾第 {rnd}/{self._retry.global_rounds} 轮："
                             f"重试 {len(retryable)} 项 ==")
             if self._retry.cooldown:
                 await asyncio.sleep(self._retry.cooldown)
-            still = [(at, e) for at, e in failures if not e.retryable]
-            more = await self._run_batch([at for at, _ in retryable], quality,
+            await self._requeue_items([item for item, _ in retryable], reporter)
+            still = [(item, e) for item, e in failures if not e.retryable]
+            more = await self._run_batch([item for item, _ in retryable], quality,
                                          album_dir, width, total, reporter, result)
             failures = still + more
+        return failures
 
-        result.failed = [(at, str(e)) for at, e in failures]
-        return result
-
-    # ---- 内部 ----
-    async def _run_batch(self, tracks, quality, album_dir, width, total,
-                         reporter, result) -> list[tuple[AlbumTrack, XdlError]]:
+    async def _run_batch(self, work: list[_AlbumWorkItem], quality, album_dir,
+                         width, total, reporter, result
+                         ) -> list[tuple[_AlbumWorkItem, XdlError]]:
         sem = asyncio.Semaphore(self._concurrency)
-        failures: list[tuple[AlbumTrack, XdlError]] = []
+        failures: list[tuple[_AlbumWorkItem, XdlError]] = []
 
-        async def worker(at: AlbumTrack) -> None:
+        async def worker(item: _AlbumWorkItem) -> None:
             async with sem:
+                at = item.track
                 await asyncio.sleep(random.uniform(0, 0.3))   # 轻微错峰
                 label = f"[{at.index}/{total}] {at.title}"
                 try:
+                    if item.task and item.task.id is not None:
+                        await self._store_call(reporter, self._store.mark_downloading,
+                                               item.task.id)
                     path = await self._resolve(at, quality, album_dir, width,
                                                reporter, label)
                     result.downloaded.append(path)
+                    if item.task and item.task.id is not None:
+                        await self._store_call(reporter, self._store.mark_done,
+                                               item.task.id, path)
                     _note(reporter, f"  ✓ {label}")
                 except XdlError as e:
+                    if item.task and item.task.id is not None:
+                        await self._store_call(reporter, self._store.mark_failed,
+                                               item.task.id, e.category, str(e))
                     _note(reporter, f"  ✗ {label} — {e}")
-                    failures.append((at, e))
+                    failures.append((item, e))
 
-        await asyncio.gather(*(worker(at) for at in tracks))
+        await asyncio.gather(*(worker(item) for item in work))
         return failures
+
+    async def _requeue_items(self, items: list[_AlbumWorkItem], reporter) -> None:
+        if self._store is None:
+            return
+        tasks = [item.task for item in items if item.task is not None]
+        if tasks:
+            await self._store_call(reporter, self._store.upsert_pending, tasks)
+
+    async def _store_call(self, reporter, fn, *args, default=None):
+        if self._store is None:
+            return default
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as e:
+            _note(reporter, f"任务库操作失败，已继续下载：{e}")
+            return default
 
     async def _resolve(self, at, quality, album_dir, width, reporter, label) -> str:
         return await _run_with_retry(
@@ -218,3 +319,80 @@ class DownloadAlbumUseCase:
             if os.path.exists(cand):
                 return cand
         return None
+
+
+class ResumeUseCase:
+    """从任务库恢复未完成的专辑任务。"""
+
+    def __init__(self, source: Source, sink: MediaSink, download_dir: str,
+                 store: TaskStore, concurrency: int = 4,
+                 retry: RetryPolicy | None = None):
+        self._source = source
+        self._sink = sink
+        self._download_dir = download_dir
+        self._store = store
+        self._concurrency = max(1, concurrency)
+        self._retry = retry or RetryPolicy()
+
+    async def execute(self, reporter: ProgressReporter | None = None) -> list[AlbumResult]:
+        stale = await self._store_call(reporter, self._store.requeue_stale, default=0)
+        retryable = await self._store_call(reporter, self._store.requeue_retryable_failed,
+                                           default=0)
+        if stale or retryable:
+            _note(reporter, f"已恢复 {stale + retryable} 个未完成任务。")
+
+        albums = await self._store_call(reporter, self._store.pending_albums,
+                                        default=[])
+        if not albums:
+            _note(reporter, "没有未完成任务。")
+            return []
+
+        downloader = DownloadAlbumUseCase(
+            self._source, self._sink, self._download_dir,
+            concurrency=self._concurrency, retry=self._retry, store=self._store,
+        )
+        results: list[AlbumResult] = []
+        await self._source.open()
+        try:
+            for album_id, title, _count in albums:
+                tasks = await self._store_call(reporter, self._store.pending_tasks,
+                                               album_id, default=[])
+                if not tasks:
+                    continue
+                total = await self._store_call(reporter, self._store.album_total,
+                                               album_id, default=0)
+                merged = AlbumResult(title)
+                for quality_value, group in self._by_quality(tasks).items():
+                    try:
+                        quality = Quality(quality_value)
+                    except ValueError:
+                        for task in group:
+                            merged.failed.append((
+                                AlbumTrack(task.track_id, task.title, task.album_index),
+                                f"未知音质: {quality_value}",
+                            ))
+                        continue
+                    partial = await downloader.resume_tasks(
+                        album_id, title, group, quality,
+                        total_known=total, reporter=reporter,
+                    )
+                    merged.downloaded.extend(partial.downloaded)
+                    merged.skipped.extend(partial.skipped)
+                    merged.failed.extend(partial.failed)
+                results.append(merged)
+        finally:
+            await self._source.close()
+        return results
+
+    async def _store_call(self, reporter, fn, *args, default=None):
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as e:
+            _note(reporter, f"任务库操作失败，已继续：{e}")
+            return default
+
+    def _by_quality(self, tasks: list[DownloadTask]) -> dict[str, list[DownloadTask]]:
+        grouped: dict[str, list[DownloadTask]] = defaultdict(list)
+        for task in tasks:
+            grouped[task.quality].append(task)
+        return grouped

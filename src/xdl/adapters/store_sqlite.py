@@ -258,6 +258,14 @@ class SqliteTaskStore:
             ).fetchone()
         return str(row["cursor"]) if row else ""
 
+    def album_total(self, album_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT total_known FROM album_sync WHERE album_id=?",
+                (album_id,),
+            ).fetchone()
+        return int(row["total_known"]) if row else 0
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

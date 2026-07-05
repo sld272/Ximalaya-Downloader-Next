@@ -87,6 +87,7 @@ def test_progress_and_album_cursor(tmp_path):
         store.save_album_meta("a", "专辑", 20)
         store.save_album_cursor("a", "cursor-1")
         assert store.album_cursor("a") == "cursor-1"
+        assert store.album_total("a") == 20
         assert store.pending_albums() == [("a", "专辑", 1)]
     finally:
         store.close()

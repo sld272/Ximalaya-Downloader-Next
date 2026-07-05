@@ -49,12 +49,27 @@ def _cmd_track(app: Facade, args) -> int:
 def _cmd_album(app: Facade, args) -> int:
     result = app.download_album(args.target, quality=args.quality,
                                 range_=args.range, reporter=ConsoleProgress())
+    _print_album_result(result)
+    return 1 if result.failed else 0
+
+
+def _cmd_resume(app: Facade, args) -> int:
+    results = app.resume(reporter=ConsoleProgress())
+    if not results:
+        return 0
+    failed = False
+    for result in results:
+        _print_album_result(result)
+        failed = failed or bool(result.failed)
+    return 1 if failed else 0
+
+
+def _print_album_result(result) -> None:
     print("\n" + result.summary())
     if result.failed:
         print("失败明细：")
         for at, err in result.failed:
             print(f"  [{at.index}] {at.title} — {err}")
-    return 1 if result.failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("login", help="打开浏览器登录并保存会话")
+    sub.add_parser("resume", help="继续上次未完成的下载")
 
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
@@ -88,7 +104,12 @@ def main(argv: list[str] | None = None) -> int:
         settings.download_dir = args.download_dir
     app = Facade.from_config(settings)
 
-    handlers = {"login": _cmd_login, "track": _cmd_track, "album": _cmd_album}
+    handlers = {
+        "login": _cmd_login,
+        "track": _cmd_track,
+        "album": _cmd_album,
+        "resume": _cmd_resume,
+    }
     try:
         return handlers[args.command](app, args)
     except XdlError as e:
