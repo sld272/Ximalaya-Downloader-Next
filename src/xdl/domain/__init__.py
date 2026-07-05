@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 from .models import (
-    Quality, PlayUrl, Track, AlbumTrack, Album,
+    Quality, TaskState, DownloadTask, PlayUrl, Track, AlbumTrack, Album,
     parse_track_id, parse_album_id, parse_range,
+    transition_task_state,
 )
 from .naming import NamingPolicy
 
 __all__ = [
-    "Quality", "PlayUrl", "Track", "AlbumTrack", "Album",
-    "parse_track_id", "parse_album_id", "parse_range", "NamingPolicy",
+    "Quality", "TaskState", "DownloadTask", "PlayUrl", "Track", "AlbumTrack",
+    "Album", "parse_track_id", "parse_album_id", "parse_range",
+    "transition_task_state", "NamingPolicy",
 ]

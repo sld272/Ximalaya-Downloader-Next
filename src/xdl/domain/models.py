@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""领域模型（纯对象，无 I/O）。
-
-见 docs/architecture.md §5。当前 MVP 实现单曲下载所需的最小集合：
-Quality（含降级协商）、PlayUrl、Track。DownloadTask 状态机等留待任务引擎阶段。
-"""
+"""领域模型（纯对象，无 I/O）。"""
 from __future__ import annotations
 
 import re
@@ -44,6 +40,37 @@ class Quality(Enum):
         return ranked[1] if len(ranked) >= 2 else ranked[0]     # STANDARD：次优档
 
 
+class TaskState(Enum):
+    """下载任务状态。
+
+    DOWNLOADING 是运行中瞬态；进程崩溃后由任务库恢复为 PENDING。
+    """
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
+    DONE = "done"
+    FAILED = "failed"
+
+
+_TASK_TRANSITIONS = {
+    TaskState.PENDING: {TaskState.DOWNLOADING},
+    TaskState.DOWNLOADING: {TaskState.DONE, TaskState.FAILED},
+    TaskState.FAILED: {TaskState.PENDING},
+    TaskState.DONE: set(),
+}
+
+
+def transition_task_state(current: TaskState, target: TaskState,
+                          *, retryable: bool = False) -> TaskState:
+    """校验并返回新的任务状态；非法转移抛 ValueError。"""
+    if current == target:
+        return target
+    if current is TaskState.FAILED and target is TaskState.PENDING and not retryable:
+        raise ValueError("FAILED 只能在可重试错误收尾/恢复时回到 PENDING")
+    if target not in _TASK_TRANSITIONS[current]:
+        raise ValueError(f"非法任务状态转移: {current.value} -> {target.value}")
+    return target
+
+
 @dataclass
 class PlayUrl:
     """单个可播放资源。url 为已解码、可直接下载的地址。"""
@@ -58,6 +85,25 @@ class PlayUrl:
     @property
     def ext(self) -> str:
         return ".m4a" if self.is_m4a else ".mp3"
+
+
+@dataclass
+class DownloadTask:
+    """任务引擎的持久化工作单元。"""
+    track_id: str
+    album_id: str
+    title: str
+    quality: str
+    album_index: int
+    state: TaskState = TaskState.PENDING
+    target_path: str = ""
+    part_path: str = ""
+    total_bytes: int = 0
+    bytes_done: int = 0
+    attempts: int = 0
+    last_error_code: str = ""
+    last_error_msg: str = ""
+    id: int | None = None
 
 
 @dataclass

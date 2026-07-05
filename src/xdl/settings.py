@@ -26,6 +26,7 @@ class Settings:
     # 真实 Chrome 接管（见 adapters/source_chrome.py）
     chrome_path: str = ""           # 为空则自动探测
     chrome_profile_dir: str = ""    # 专用 Chrome 用户配置目录（持久化登录态）
+    task_db_path: str = ""          # 任务库（默认 ~/.xdl/tasks.db）
     cdp_port: int = 9222            # Chrome 远程调试端口
     chrome_headless: bool = True    # 下载解析用无头真实 Chrome（登录始终有头）
 
@@ -41,5 +42,7 @@ class Settings:
     def __post_init__(self):
         if not self.chrome_profile_dir:
             self.chrome_profile_dir = os.path.join(_xdl_home(), "chrome-profile")
+        if not self.task_db_path:
+            self.task_db_path = os.path.join(_xdl_home(), "tasks.db")
         if not self.chrome_path:
             self.chrome_path = platform.find_chrome() or ""
