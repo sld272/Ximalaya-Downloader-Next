@@ -33,6 +33,12 @@ class NetworkError(XdlError):
     category = "network"
 
 
+class CancelledByUser(XdlError):
+    """用户请求优雅停止；任务应保留为可恢复状态。"""
+    retryable = True
+    category = "cancelled"
+
+
 class ApiError(XdlError):
     """接口层错误（限流 / 被拒 / 不存在 / 响应异常）。
 

@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, TypeVar
 
 from ..domain import (Track, Album, AlbumTrack, DownloadTask, Quality, NamingPolicy,
                       parse_track_id, parse_album_id)
-from ..errors import XdlError, AuthError, ApiError
+from ..errors import XdlError, AuthError, ApiError, CancelledByUser
 from ..ports import Source, MediaSink, ProgressReporter, TaskStore
 
 _EXTS = (".m4a", ".mp3")
@@ -51,6 +52,8 @@ async def _run_with_retry(fn: Callable[[], Awaitable[_T]], policy: RetryPolicy,
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return await fn()
+        except CancelledByUser:
+            raise
         except XdlError as e:
             last = e
             if not e.retryable or attempt >= policy.max_attempts:
@@ -121,13 +124,17 @@ class DownloadAlbumUseCase:
 
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
                  concurrency: int = 4, retry: RetryPolicy | None = None,
-                 store: TaskStore | None = None):
+                 store: TaskStore | None = None,
+                 stop_event: asyncio.Event | None = None,
+                 cancel_event: threading.Event | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
         self._concurrency = max(1, concurrency)
         self._retry = retry or RetryPolicy()
         self._store = store
+        self._stop_event = stop_event
+        self._cancel_event = cancel_event
 
     async def execute(self, target: str, quality: Quality,
                       start: int | None = None, end: int | None = None,
@@ -230,6 +237,8 @@ class DownloadAlbumUseCase:
 
         # 失败收尾轮：跨轮间隔后统一重试「可重试」的残余失败项。
         for rnd in range(1, self._retry.global_rounds + 1):
+            if self._is_stopping():
+                break
             retryable = [(item, e) for item, e in failures if e.retryable]
             if not retryable:
                 break
@@ -253,7 +262,11 @@ class DownloadAlbumUseCase:
         async def worker(item: _AlbumWorkItem) -> None:
             async with sem:
                 at = item.track
+                if self._is_stopping():
+                    return
                 await asyncio.sleep(random.uniform(0, 0.3))   # 轻微错峰
+                if self._is_stopping():
+                    return
                 label = f"[{at.index}/{total}] {at.title}"
                 try:
                     if item.task and item.task.id is not None:
@@ -266,6 +279,9 @@ class DownloadAlbumUseCase:
                         await self._store_call(reporter, self._store.mark_done,
                                                item.task.id, path)
                     _note(reporter, f"  ✓ {label}")
+                except CancelledByUser:
+                    await self._requeue_items([item], reporter)
+                    _note(reporter, f"  ↷ {label} — 已停止，保留待恢复")
                 except XdlError as e:
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_failed,
@@ -298,7 +314,9 @@ class DownloadAlbumUseCase:
             self._retry, reporter, label=f"{label} ")
 
     async def _download_one(self, at, quality, album_dir, width) -> str:
+        self._raise_if_stopping()
         track = await self._source.get_track(at.track_id)
+        self._raise_if_stopping()
         play = track.select(quality)
         if not play or not play.url:
             if track.is_paid and not track.is_authorized:
@@ -308,8 +326,16 @@ class DownloadAlbumUseCase:
                                                index=at.index, index_width=width)
         target_path = os.path.join(album_dir, filename)
         # 下载放线程池：多集下载并行、且不挡住事件循环里的解析
-        await asyncio.to_thread(self._sink.write, play.url, target_path, None)
+        await asyncio.to_thread(self._sink.write, play.url, target_path, None,
+                                self._cancel_event)
         return target_path
+
+    def _is_stopping(self) -> bool:
+        return self._stop_event is not None and self._stop_event.is_set()
+
+    def _raise_if_stopping(self) -> None:
+        if self._is_stopping():
+            raise CancelledByUser("用户请求停止下载。")
 
     def _existing_path(self, album_dir: str, at: AlbumTrack, width: int) -> str | None:
         stem = NamingPolicy.track_filename(at.title, "", index=at.index,
@@ -326,13 +352,17 @@ class ResumeUseCase:
 
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
                  store: TaskStore, concurrency: int = 4,
-                 retry: RetryPolicy | None = None):
+                 retry: RetryPolicy | None = None,
+                 stop_event: asyncio.Event | None = None,
+                 cancel_event: threading.Event | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
         self._store = store
         self._concurrency = max(1, concurrency)
         self._retry = retry or RetryPolicy()
+        self._stop_event = stop_event
+        self._cancel_event = cancel_event
 
     async def execute(self, reporter: ProgressReporter | None = None) -> list[AlbumResult]:
         stale = await self._store_call(reporter, self._store.requeue_stale, default=0)
@@ -350,6 +380,7 @@ class ResumeUseCase:
         downloader = DownloadAlbumUseCase(
             self._source, self._sink, self._download_dir,
             concurrency=self._concurrency, retry=self._retry, store=self._store,
+            stop_event=self._stop_event, cancel_event=self._cancel_event,
         )
         results: list[AlbumResult] = []
         await self._source.open()

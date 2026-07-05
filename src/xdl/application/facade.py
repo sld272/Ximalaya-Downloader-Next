@@ -7,8 +7,12 @@ asyncio 驱动异步解析/并发（`asyncio.run` 收口），前端零改动。
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import threading
 
 from ..domain import Quality, parse_range
+from ..errors import CancelledByUser
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy)
@@ -66,23 +70,71 @@ class Facade:
     async def _download_album(self, target, quality, range_, reporter) -> AlbumResult:
         q = Quality(quality or self._settings.default_quality)
         start, end = parse_range(range_)
+        stop_event = asyncio.Event()
+        cancel_event = threading.Event()
+        cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
         usecase = DownloadAlbumUseCase(self._source, self._sink,
                                        self._settings.download_dir,
                                        concurrency=self._settings.max_concurrency,
                                        retry=self._retry_policy(),
-                                       store=self._store)
+                                       store=self._store,
+                                       stop_event=stop_event,
+                                       cancel_event=cancel_event)
         # 全程复用一个 Chrome 会话（共享上下文里按需开 page 并发解析）
-        await self._source.open()
         try:
-            return await usecase.execute(target, q, start, end, reporter)
+            await self._source.open()
+            try:
+                result = await usecase.execute(target, q, start, end, reporter)
+            finally:
+                await self._source.close()
+            if stop_event.is_set():
+                raise CancelledByUser("已优雅停止，`xdl resume` 可继续。")
+            return result
         finally:
-            await self._source.close()
+            cleanup_signal()
 
     async def _resume(self, reporter) -> list[AlbumResult]:
         if self._store is None:
             return []
+        stop_event = asyncio.Event()
+        cancel_event = threading.Event()
+        cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
         usecase = ResumeUseCase(self._source, self._sink,
                                 self._settings.download_dir, self._store,
                                 concurrency=self._settings.max_concurrency,
-                                retry=self._retry_policy())
-        return await usecase.execute(reporter)
+                                retry=self._retry_policy(),
+                                stop_event=stop_event,
+                                cancel_event=cancel_event)
+        try:
+            result = await usecase.execute(reporter)
+            if stop_event.is_set():
+                raise CancelledByUser("已优雅停止，`xdl resume` 可继续。")
+            return result
+        finally:
+            cleanup_signal()
+
+    def _install_sigint_handler(self, stop_event: asyncio.Event,
+                                cancel_event: threading.Event):
+        loop = asyncio.get_running_loop()
+
+        def request_stop() -> None:
+            if stop_event.is_set():
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+                os.kill(os.getpid(), signal.SIGINT)
+                return
+            stop_event.set()
+            cancel_event.set()
+
+        try:
+            loop.add_signal_handler(signal.SIGINT, request_stop)
+            return lambda: loop.remove_signal_handler(signal.SIGINT)
+        except (NotImplementedError, RuntimeError, ValueError):
+            try:
+                previous = signal.getsignal(signal.SIGINT)
+                signal.signal(
+                    signal.SIGINT,
+                    lambda _sig, _frame: loop.call_soon_threadsafe(request_stop),
+                )
+            except (RuntimeError, ValueError):
+                return lambda: None
+            return lambda: signal.signal(signal.SIGINT, previous)

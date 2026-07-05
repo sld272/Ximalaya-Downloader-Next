@@ -33,7 +33,8 @@ class Source(Protocol):
 @runtime_checkable
 class MediaSink(Protocol):
     """输出：把 URL 落盘（含进度回报、原子落盘）。"""
-    def write(self, url: str, target_path: str, reporter: "ProgressReporter") -> None: ...
+    def write(self, url: str, target_path: str, reporter: "ProgressReporter",
+              cancel=None) -> None: ...
 
 
 @runtime_checkable

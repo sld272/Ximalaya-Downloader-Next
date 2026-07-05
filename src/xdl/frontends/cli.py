@@ -10,7 +10,7 @@ import sys
 
 from ..application import Facade
 from ..settings import Settings
-from ..errors import XdlError
+from ..errors import XdlError, CancelledByUser
 
 
 class ConsoleProgress:
@@ -112,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](app, args)
+    except CancelledByUser as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 130
     except XdlError as e:
         print(f"\n[错误] {e}", file=sys.stderr)
         return 1

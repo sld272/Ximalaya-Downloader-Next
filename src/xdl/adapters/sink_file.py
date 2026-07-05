@@ -11,14 +11,14 @@ import os
 import requests
 
 from ..config import platform
-from ..errors import NetworkError
+from ..errors import CancelledByUser, NetworkError
 
 
 class FileSink:
     def __init__(self, http_timeout: int = 60):
         self._timeout = http_timeout
 
-    def write(self, url: str, target_path: str, reporter) -> None:
+    def write(self, url: str, target_path: str, reporter, cancel=None) -> None:
         os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
         part_path = target_path + ".part"
         headers = {"User-Agent": platform.UA, "Referer": platform.REFERER}
@@ -33,6 +33,8 @@ class FileSink:
                     for chunk in r.iter_content(chunk_size=64 * 1024):
                         if not chunk:
                             continue
+                        if cancel is not None and cancel.is_set():
+                            raise CancelledByUser("用户请求停止下载。")
                         f.write(chunk)
                         done += len(chunk)
                         if reporter:

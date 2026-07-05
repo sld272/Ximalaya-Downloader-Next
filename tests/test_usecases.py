@@ -10,7 +10,7 @@ from xdl.adapters import SqliteTaskStore
 from xdl.domain import Album, AlbumTrack, DownloadTask, Track, PlayUrl, Quality
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       ResumeUseCase, RetryPolicy)
-from xdl.errors import NetworkError, AuthError, ApiError
+from xdl.errors import NetworkError, AuthError, ApiError, CancelledByUser
 
 # 退避/冷却全置 0，测试不真正 sleep
 FAST = RetryPolicy(max_attempts=3, backoff_base=0, cooldown=0, global_rounds=2)
@@ -24,10 +24,16 @@ class FakeSink:
     def __init__(self):
         self.writes = []
 
-    def write(self, url, path, reporter):   # 同步，用例里经 to_thread 调用
+    def write(self, url, path, reporter, cancel=None):   # 同步，用例里经 to_thread 调用
         self.writes.append((url, path))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "w").close()
+
+
+class CancelSink(FakeSink):
+    def write(self, url, path, reporter, cancel=None):
+        self.writes.append((url, path))
+        raise CancelledByUser("stop")
 
 
 class FakeSource:
@@ -167,6 +173,48 @@ def test_album_store_records_failed_error(tmp_path):
         rows = _db_rows(db)
         assert rows[0]["state"] == "failed"
         assert rows[0]["last_error_code"] == "network"
+        assert rows[0]["attempts"] == 1
+    finally:
+        store.close()
+
+
+def test_album_stop_before_dispatch_keeps_pending(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album())
+        sink = FakeSink()
+
+        async def scenario():
+            stop = asyncio.Event()
+            stop.set()
+            uc = DownloadAlbumUseCase(src, sink, str(tmp_path / "downloads"),
+                                      retry=FAST, store=store, stop_event=stop)
+            return await uc.execute("123", Quality.STANDARD)
+
+        res = run(scenario())
+        rows = _db_rows(db)
+        assert not res.downloaded and not res.failed
+        assert sink.writes == []
+        assert rows[0]["state"] == "pending"
+        assert rows[0]["attempts"] == 0
+    finally:
+        store.close()
+
+
+def test_album_cancelled_write_requeues_task(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album())
+        sink = CancelSink()
+        uc = DownloadAlbumUseCase(src, sink, str(tmp_path / "downloads"),
+                                  retry=FAST, store=store)
+        res = run(uc.execute("123", Quality.STANDARD))
+        rows = _db_rows(db)
+        assert not res.downloaded and not res.failed
+        assert len(sink.writes) == 1
+        assert rows[0]["state"] == "pending"
         assert rows[0]["attempts"] == 1
     finally:
         store.close()
