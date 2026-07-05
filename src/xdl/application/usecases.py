@@ -272,7 +272,7 @@ class DownloadAlbumUseCase:
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_downloading,
                                                item.task.id)
-                    path = await self._resolve(at, quality, album_dir, width,
+                    path = await self._resolve(item, quality, album_dir, width,
                                                reporter, label)
                     result.downloaded.append(path)
                     if item.task and item.task.id is not None:
@@ -308,12 +308,14 @@ class DownloadAlbumUseCase:
             _note(reporter, f"任务库操作失败，已继续下载：{e}")
             return default
 
-    async def _resolve(self, at, quality, album_dir, width, reporter, label) -> str:
+    async def _resolve(self, item, quality, album_dir, width, reporter, label) -> str:
         return await _run_with_retry(
-            lambda: self._download_one(at, quality, album_dir, width),
+            lambda: self._download_one(item.track, quality, album_dir, width,
+                                       item.task),
             self._retry, reporter, label=f"{label} ")
 
-    async def _download_one(self, at, quality, album_dir, width) -> str:
+    async def _download_one(self, at, quality, album_dir, width,
+                            task: DownloadTask | None = None) -> str:
         self._raise_if_stopping()
         track = await self._source.get_track(at.track_id)
         self._raise_if_stopping()
@@ -327,8 +329,21 @@ class DownloadAlbumUseCase:
         target_path = os.path.join(album_dir, filename)
         # 下载放线程池：多集下载并行、且不挡住事件循环里的解析
         await asyncio.to_thread(self._sink.write, play.url, target_path, None,
-                                self._cancel_event)
+                                self._cancel_event, self._progress_sink(task),
+                                task.total_bytes if task else 0)
         return target_path
+
+    def _progress_sink(self, task: DownloadTask | None):
+        if self._store is None or task is None or task.id is None:
+            return None
+
+        def persist(done: int, total: int) -> None:
+            try:
+                self._store.record_progress(task.id, done, total)
+            except Exception:
+                pass
+
+        return persist
 
     def _is_stopping(self) -> bool:
         return self._stop_event is not None and self._stop_event.is_set()

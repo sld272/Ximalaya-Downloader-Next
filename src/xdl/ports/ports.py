@@ -34,7 +34,7 @@ class Source(Protocol):
 class MediaSink(Protocol):
     """输出：把 URL 落盘（含进度回报、原子落盘）。"""
     def write(self, url: str, target_path: str, reporter: "ProgressReporter",
-              cancel=None) -> None: ...
+              cancel=None, progress_sink=None, expected_total: int = 0) -> None: ...
 
 
 @runtime_checkable

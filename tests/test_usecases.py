@@ -24,14 +24,18 @@ class FakeSink:
     def __init__(self):
         self.writes = []
 
-    def write(self, url, path, reporter, cancel=None):   # 同步，用例里经 to_thread 调用
+    def write(self, url, path, reporter, cancel=None, progress_sink=None,
+              expected_total=0):   # 同步，用例里经 to_thread 调用
         self.writes.append((url, path))
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if progress_sink:
+            progress_sink(1, 1)
         open(path, "w").close()
 
 
 class CancelSink(FakeSink):
-    def write(self, url, path, reporter, cancel=None):
+    def write(self, url, path, reporter, cancel=None, progress_sink=None,
+              expected_total=0):
         self.writes.append((url, path))
         raise CancelledByUser("stop")
 
