@@ -100,6 +100,7 @@ class AlbumResult:
     skipped: list[str] = field(default_factory=list)
     failed: list[tuple[AlbumTrack, str]] = field(default_factory=list)
     incomplete: bool = False
+    stopped: bool = False
 
     def summary(self) -> str:
         line = (f"专辑《{self.album_title}》：下载 {len(self.downloaded)}，"

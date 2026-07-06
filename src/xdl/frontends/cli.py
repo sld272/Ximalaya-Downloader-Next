@@ -50,6 +50,9 @@ def _cmd_album(app: Facade, args) -> int:
     result = app.download_album(args.target, quality=args.quality,
                                 range_=args.range, reporter=ConsoleProgress())
     _print_album_result(result)
+    if result.stopped:
+        print("\n已优雅停止，`xdl resume` 可继续。", file=sys.stderr)
+        return 130
     return 1 if result.failed else 0
 
 
@@ -58,9 +61,14 @@ def _cmd_resume(app: Facade, args) -> int:
     if not results:
         return 0
     failed = False
+    stopped = False
     for result in results:
         _print_album_result(result)
         failed = failed or bool(result.failed)
+        stopped = stopped or result.stopped
+    if stopped:
+        print("\n已优雅停止，`xdl resume` 可继续。", file=sys.stderr)
+        return 130
     return 1 if failed else 0
 
 

@@ -12,7 +12,6 @@ import signal
 import threading
 
 from ..domain import Quality, parse_range
-from ..errors import CancelledByUser
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy)
@@ -88,7 +87,7 @@ class Facade:
             finally:
                 await self._source.close()
             if stop_event.is_set():
-                raise CancelledByUser("已优雅停止，`xdl resume` 可继续。")
+                result.stopped = True
             return result
         finally:
             cleanup_signal()
@@ -108,7 +107,8 @@ class Facade:
         try:
             result = await usecase.execute(reporter)
             if stop_event.is_set():
-                raise CancelledByUser("已优雅停止，`xdl resume` 可继续。")
+                for album_result in result:
+                    album_result.stopped = True
             return result
         finally:
             cleanup_signal()
