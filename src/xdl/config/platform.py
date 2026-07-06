@@ -84,14 +84,17 @@ XOR_KEY_A = [
     206, 30, 10, 227, 36, 95, 161, 16, 135, 150, 235, 116, 242, 116, 165, 171,
 ]
 
-# 注入页面（在任何页面脚本前）的钩子：patch XHR.prototype，
-# 截获 baseInfo 的成功响应（含 playUrlList）到 window.__xmcap。
+# 注入页面（在任何页面脚本前）的钩子：patch XHR.prototype，截获 baseInfo 的成功
+# 响应（含 playUrlList）。**必须按 trackId 归档**：/sound 页的全局播放器会在加载时
+# 为「上次播放/推荐」的音频先发一条 baseInfo，若不按 id 区分会抓错集（永远抓成那一集）。
+# 归档到 window.__xmcaps[trackId]；window.__xmcap 仅作最后一次捕获的兼容留存。
 INIT_HOOK_JS = r"""
 (() => {
   if (window.__xmHooked) return;
   window.__xmHooked = true;
   window.__xmcap = null;
   window.__xmerr = null;
+  window.__xmcaps = {};
   const P = XMLHttpRequest.prototype;
   const oOpen = P.open, oSend = P.send;
   P.open = function(m, u){ this.__u = u; return oOpen.apply(this, arguments); };
@@ -102,8 +105,14 @@ INIT_HOOK_JS = r"""
         if (u.indexOf('baseInfo') === -1) return;
         const b = JSON.parse(this.responseText);
         const ti = b && (b.trackInfo || (b.data && b.data.trackInfo));
-        if (ti && ti.playUrlList) window.__xmcap = ti;
-        else window.__xmerr = { ret: b && b.ret, msg: b && b.msg };
+        if (ti && ti.playUrlList) {
+          const m = u.match(/[?&]trackId=(\d+)/);
+          const id = m ? m[1] : (ti.trackId != null ? String(ti.trackId) : '');
+          if (id) window.__xmcaps[id] = ti;
+          window.__xmcap = ti;
+        } else {
+          window.__xmerr = { ret: b && b.ret, msg: b && b.msg };
+        }
       } catch (e) {}
     });
     return oSend.apply(this, arguments);

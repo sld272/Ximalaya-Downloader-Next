@@ -228,8 +228,12 @@ class ChromeSource:
         last_err = None
         start = time.time()
         tried_click = False
+        # 只认「本 trackId」的 baseInfo：/sound 页全局播放器会先为推荐/上次播放的音频
+        # 发一条 baseInfo，抓错会导致每次都下成同一集（见 platform.INIT_HOOK_JS）。
         while time.time() - start < self._timeout:
-            node = await page.evaluate("window.__xmcap")
+            node = await page.evaluate(
+                "id => (window.__xmcaps && window.__xmcaps[id]) || null",
+                str(track_id))
             if node:
                 break
             last_err = await page.evaluate("window.__xmerr")
