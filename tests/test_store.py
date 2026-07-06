@@ -13,6 +13,7 @@ def _task(track_id="1", quality="standard", album_id="a", index=1):
         title=f"第{index}集",
         quality=quality,
         album_index=index,
+        index_width=2,
     )
 
 
@@ -29,10 +30,12 @@ def test_store_migrates_empty_db(tmp_path):
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(download_task)")}
     finally:
         conn.close()
-    assert version == "1"
+    assert version == "2"
     assert {"download_task", "album_sync", "meta"} <= tables
+    assert {"retryable", "index_width"} <= columns
 
 
 def test_upsert_pending_dedupes_and_keeps_done(tmp_path):
@@ -45,7 +48,10 @@ def test_upsert_pending_dedupes_and_keeps_done(tmp_path):
 
         store.mark_downloading(first.id)
         store.mark_done(first.id, "/tmp/final.mp3")
-        assert store.upsert_pending([_task()]) == []
+        done = store.upsert_pending([_task()])
+        assert len(done) == 1
+        assert done[0].id == first.id
+        assert done[0].state is TaskState.DONE
         assert store.pending_tasks("a") == []
     finally:
         store.close()
@@ -61,9 +67,9 @@ def test_requeue_stale_and_retryable_failed(tmp_path):
         ])
         store.mark_downloading(one.id)
         store.mark_downloading(two.id)
-        store.mark_failed(two.id, "network", "timeout")
+        store.mark_failed(two.id, "network", "timeout", True)
         store.mark_downloading(three.id)
-        store.mark_failed(three.id, "auth", "denied")
+        store.mark_failed(three.id, "api", "not found", False)
 
         assert store.requeue_stale() == 1
         assert store.requeue_retryable_failed() == 1
@@ -75,11 +81,28 @@ def test_requeue_stale_and_retryable_failed(tmp_path):
         store.close()
 
 
+def test_done_task_ignores_late_failure_update(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        task = store.upsert_pending([_task()])[0]
+        store.mark_downloading(task.id)
+        store.mark_done(task.id, "/tmp/final.mp3")
+        store.mark_failed(task.id, "api", "late failure", False)
+
+        row = store.upsert_pending([_task()])[0]
+        assert row.state is TaskState.DONE
+        assert row.last_error_code == ""
+    finally:
+        store.close()
+
+
 def test_progress_and_album_cursor(tmp_path):
     store = SqliteTaskStore(str(tmp_path / "tasks.db"))
     try:
         task = store.upsert_pending([_task()])[0]
+        store.mark_downloading(task.id)
         store.record_progress(task.id, 1024, 4096)
+        store.requeue_stale()
         updated = store.pending_tasks("a")[0]
         assert updated.bytes_done == 1024
         assert updated.total_bytes == 4096

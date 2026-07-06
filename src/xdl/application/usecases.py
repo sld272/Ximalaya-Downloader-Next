@@ -154,7 +154,8 @@ class DownloadAlbumUseCase:
         width = len(str(album.total or len(album.tracks) or 1))
         total = album.total or len(album.tracks)
 
-        task_rows = await self._prepare_tasks(album, selected, quality, reporter)
+        task_rows = await self._prepare_tasks(album, selected, quality, width,
+                                              reporter)
         task_by_track = ({t.track_id: t for t in task_rows}
                          if task_rows is not None else None)
 
@@ -186,7 +187,7 @@ class DownloadAlbumUseCase:
             return result
         album_dir = os.path.join(self._download_dir, NamingPolicy.sanitize(album_title))
         total = total_known or max((t.album_index for t in tasks), default=len(tasks))
-        width = len(str(total or len(tasks) or 1))
+        width = self._resume_index_width(tasks, total)
 
         work: list[_AlbumWorkItem] = []
         for task in tasks:
@@ -209,7 +210,8 @@ class DownloadAlbumUseCase:
 
     # ---- 内部 ----
     async def _prepare_tasks(self, album: Album, selected: list[AlbumTrack],
-                             quality: Quality, reporter) -> list[DownloadTask] | None:
+                             quality: Quality, width: int, reporter
+                             ) -> list[DownloadTask] | None:
         if self._store is None:
             return None
         tasks = [
@@ -219,6 +221,7 @@ class DownloadAlbumUseCase:
                 title=at.title,
                 quality=quality.value,
                 album_index=at.index,
+                index_width=width,
             )
             for at in selected
         ]
@@ -285,7 +288,8 @@ class DownloadAlbumUseCase:
                 except XdlError as e:
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_failed,
-                                               item.task.id, e.category, str(e))
+                                               item.task.id, e.category, str(e),
+                                               e.retryable)
                     _note(reporter, f"  ✗ {label} — {e}")
                     failures.append((item, e))
 
@@ -361,6 +365,12 @@ class DownloadAlbumUseCase:
                 return cand
         return None
 
+    def _resume_index_width(self, tasks: list[DownloadTask], total: int) -> int:
+        stored = max((t.index_width for t in tasks), default=0)
+        if stored > 0:
+            return stored
+        return len(str(total or len(tasks) or 1))
+
 
 class ResumeUseCase:
     """从任务库恢复未完成的专辑任务。"""
@@ -417,6 +427,11 @@ class ResumeUseCase:
                                 AlbumTrack(task.track_id, task.title, task.album_index),
                                 f"未知音质: {quality_value}",
                             ))
+                            if task.id is not None:
+                                await self._store_call(
+                                    reporter, self._store.mark_failed,
+                                    task.id, "api", f"未知音质: {quality_value}", False,
+                                )
                         continue
                     partial = await downloader.resume_tasks(
                         album_id, title, group, quality,

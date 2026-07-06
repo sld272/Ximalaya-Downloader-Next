@@ -51,26 +51,6 @@ class TaskState(Enum):
     FAILED = "failed"
 
 
-_TASK_TRANSITIONS = {
-    TaskState.PENDING: {TaskState.DOWNLOADING},
-    TaskState.DOWNLOADING: {TaskState.DONE, TaskState.FAILED},
-    TaskState.FAILED: {TaskState.PENDING},
-    TaskState.DONE: set(),
-}
-
-
-def transition_task_state(current: TaskState, target: TaskState,
-                          *, retryable: bool = False) -> TaskState:
-    """校验并返回新的任务状态；非法转移抛 ValueError。"""
-    if current == target:
-        return target
-    if current is TaskState.FAILED and target is TaskState.PENDING and not retryable:
-        raise ValueError("FAILED 只能在可重试错误收尾/恢复时回到 PENDING")
-    if target not in _TASK_TRANSITIONS[current]:
-        raise ValueError(f"非法任务状态转移: {current.value} -> {target.value}")
-    return target
-
-
 @dataclass
 class PlayUrl:
     """单个可播放资源。url 为已解码、可直接下载的地址。"""
@@ -98,6 +78,7 @@ class DownloadTask:
     state: TaskState = TaskState.PENDING
     target_path: str = ""
     part_path: str = ""
+    index_width: int = 0
     total_bytes: int = 0
     bytes_done: int = 0
     attempts: int = 0

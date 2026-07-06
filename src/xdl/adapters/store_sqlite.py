@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 
 from ..domain import DownloadTask, TaskState
 
-_RETRYABLE_ERROR_CODES = ("network", "sign", "api", "storage", "cancelled")
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -53,7 +51,24 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """)
 
 
-_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1]
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    if not _has_column(conn, "download_task", "retryable"):
+        conn.execute(
+            "ALTER TABLE download_task "
+            "ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0"
+        )
+    if not _has_column(conn, "download_task", "index_width"):
+        conn.execute(
+            "ALTER TABLE download_task "
+            "ADD COLUMN index_width INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2]
 
 
 class SqliteTaskStore:
@@ -83,6 +98,7 @@ class SqliteTaskStore:
                     (task.track_id, task.quality),
                 ).fetchone()
                 if row and row["state"] == TaskState.DONE.value:
+                    ids.append(int(row["id"]))
                     continue
                 if row:
                     self._conn.execute(
@@ -91,13 +107,16 @@ class SqliteTaskStore:
                         SET album_id=?, title=?, album_index=?, state=?,
                             target_path=CASE WHEN ?='' THEN target_path ELSE ? END,
                             part_path=CASE WHEN ?='' THEN part_path ELSE ? END,
-                            last_error_code='', last_error_msg='', updated_at=?
+                            index_width=CASE WHEN ? > 0 THEN ? ELSE index_width END,
+                            last_error_code='', last_error_msg='', retryable=0,
+                            updated_at=?
                         WHERE id=?
                         """,
                         (task.album_id, task.title, task.album_index,
                          TaskState.PENDING.value,
                          task.target_path, task.target_path,
                          task.part_path, task.part_path,
+                         task.index_width, task.index_width,
                          now, row["id"]),
                     )
                     ids.append(int(row["id"]))
@@ -106,15 +125,16 @@ class SqliteTaskStore:
                         """
                         INSERT INTO download_task(
                           track_id, album_id, title, quality, album_index, state,
-                          target_path, part_path, total_bytes, bytes_done, attempts,
-                          last_error_code, last_error_msg, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          target_path, part_path, index_width, total_bytes, bytes_done,
+                          attempts, last_error_code, last_error_msg, retryable,
+                          created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (task.track_id, task.album_id, task.title, task.quality,
                          task.album_index, TaskState.PENDING.value,
-                         task.target_path, task.part_path, task.total_bytes,
-                         task.bytes_done, task.attempts, task.last_error_code,
-                         task.last_error_msg, now, now),
+                         task.target_path, task.part_path, task.index_width,
+                         task.total_bytes, task.bytes_done, task.attempts,
+                         task.last_error_code, task.last_error_msg, 0, now, now),
                     )
                     ids.append(int(cur.lastrowid))
         return self._tasks_by_ids(ids)
@@ -124,10 +144,12 @@ class SqliteTaskStore:
             self._conn.execute(
                 """
                 UPDATE download_task
-                SET state=?, attempts=attempts+1, updated_at=?
-                WHERE id=?
+                SET state=?, attempts=attempts+1, retryable=0, updated_at=?
+                WHERE id=? AND state IN (?, ?, ?)
                 """,
-                (TaskState.DOWNLOADING.value, _now(), task_id),
+                (TaskState.DOWNLOADING.value, _now(), task_id,
+                 TaskState.PENDING.value, TaskState.DOWNLOADING.value,
+                 TaskState.DONE.value),
             )
 
     def mark_done(self, task_id: int, target_path: str) -> None:
@@ -137,23 +159,29 @@ class SqliteTaskStore:
                 """
                 UPDATE download_task
                 SET state=?, target_path=?, part_path='', last_error_code='',
-                    last_error_msg='', bytes_done=CASE
+                    last_error_msg='', retryable=0, bytes_done=CASE
                       WHEN total_bytes > 0 THEN total_bytes ELSE bytes_done END,
                     updated_at=?, completed_at=?
-                WHERE id=?
+                WHERE id=? AND state IN (?, ?, ?)
                 """,
-                (TaskState.DONE.value, target_path, now, now, task_id),
+                (TaskState.DONE.value, target_path, now, now, task_id,
+                 TaskState.PENDING.value, TaskState.DOWNLOADING.value,
+                 TaskState.DONE.value),
             )
 
-    def mark_failed(self, task_id: int, category: str, msg: str) -> None:
+    def mark_failed(self, task_id: int, category: str, msg: str,
+                    retryable: bool) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 UPDATE download_task
-                SET state=?, last_error_code=?, last_error_msg=?, updated_at=?
-                WHERE id=?
+                SET state=?, last_error_code=?, last_error_msg=?, retryable=?,
+                    updated_at=?
+                WHERE id=? AND state IN (?, ?, ?)
                 """,
-                (TaskState.FAILED.value, category, msg, _now(), task_id),
+                (TaskState.FAILED.value, category, msg, 1 if retryable else 0,
+                 _now(), task_id, TaskState.PENDING.value,
+                 TaskState.DOWNLOADING.value, TaskState.FAILED.value),
             )
 
     def record_progress(self, task_id: int, bytes_done: int, total: int) -> None:
@@ -163,9 +191,10 @@ class SqliteTaskStore:
                 UPDATE download_task
                 SET bytes_done=?, total_bytes=CASE WHEN ? > 0 THEN ? ELSE total_bytes END,
                     updated_at=?
-                WHERE id=?
+                WHERE id=? AND state=?
                 """,
-                (max(0, bytes_done), total, total, _now(), task_id),
+                (max(0, bytes_done), total, total, _now(), task_id,
+                 TaskState.DOWNLOADING.value),
             )
 
     def requeue_stale(self) -> int:
@@ -181,16 +210,14 @@ class SqliteTaskStore:
             return int(cur.rowcount)
 
     def requeue_retryable_failed(self) -> int:
-        marks = ",".join("?" for _ in _RETRYABLE_ERROR_CODES)
         with self._lock, self._conn:
             cur = self._conn.execute(
-                f"""
+                """
                 UPDATE download_task
-                SET state=?, updated_at=?
-                WHERE state=? AND last_error_code IN ({marks})
+                SET state=?, retryable=0, updated_at=?
+                WHERE state=? AND retryable=1
                 """,
-                (TaskState.PENDING.value, _now(), TaskState.FAILED.value,
-                 *_RETRYABLE_ERROR_CODES),
+                (TaskState.PENDING.value, _now(), TaskState.FAILED.value),
             )
             return int(cur.rowcount)
 
@@ -319,6 +346,7 @@ class SqliteTaskStore:
             state=TaskState(str(row["state"])),
             target_path=str(row["target_path"]),
             part_path=str(row["part_path"]),
+            index_width=int(row["index_width"]),
             total_bytes=int(row["total_bytes"]),
             bytes_done=int(row["bytes_done"]),
             attempts=int(row["attempts"]),

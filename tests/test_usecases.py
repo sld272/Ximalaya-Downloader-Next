@@ -158,6 +158,7 @@ def test_album_store_marks_success_done(tmp_path):
         assert [(r["state"], r["target_path"]) for r in rows] == [
             ("done", res.downloaded[0])
         ]
+        assert rows[0]["index_width"] == 1
         assert store.pending_tasks("123") == []
     finally:
         store.close()
@@ -177,6 +178,7 @@ def test_album_store_records_failed_error(tmp_path):
         rows = _db_rows(db)
         assert rows[0]["state"] == "failed"
         assert rows[0]["last_error_code"] == "network"
+        assert rows[0]["retryable"] == 1
         assert rows[0]["attempts"] == 1
     finally:
         store.close()
@@ -242,6 +244,30 @@ def test_album_second_execute_skips_done_file_without_redownload(tmp_path):
         store.close()
 
 
+def test_album_redownload_missing_done_file_is_requeueable(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album())
+        sink = FakeSink()
+        download_dir = tmp_path / "downloads"
+        uc = DownloadAlbumUseCase(src, sink, str(download_dir),
+                                  retry=FAST, store=store)
+        first = run(uc.execute("123", Quality.STANDARD))
+        os.remove(first.downloaded[0])
+
+        cancelled = DownloadAlbumUseCase(
+            src, CancelSink(), str(download_dir), retry=FAST, store=store,
+        )
+        second = run(cancelled.execute("123", Quality.STANDARD))
+        rows = _db_rows(db)
+        assert not second.downloaded and not second.failed
+        assert rows[0]["state"] == "pending"
+        assert rows[0]["attempts"] == 2
+    finally:
+        store.close()
+
+
 def test_resume_usecase_runs_pending_and_stale_tasks(tmp_path):
     db = tmp_path / "tasks.db"
     store = SqliteTaskStore(str(db))
@@ -263,5 +289,54 @@ def test_resume_usecase_runs_pending_and_stale_tasks(tmp_path):
         assert not results[0].failed
         assert store.pending_tasks("123") == []
         assert [r["state"] for r in _db_rows(db)] == ["done", "done"]
+    finally:
+        store.close()
+
+
+def test_resume_marks_unknown_quality_as_terminal_failure(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        store.save_album_meta("123", "专辑", 1)
+        store.upsert_pending([
+            DownloadTask("1", "123", "第1集", "hq", 1),
+        ])
+
+        uc = ResumeUseCase(FakeSource(), FakeSink(), str(tmp_path / "downloads"),
+                           store, retry=FAST)
+        results = run(uc.execute())
+        rows = _db_rows(db)
+        assert len(results) == 1
+        assert len(results[0].failed) == 1
+        assert rows[0]["state"] == "failed"
+        assert rows[0]["last_error_msg"] == "未知音质: hq"
+        assert rows[0]["retryable"] == 0
+        assert store.pending_albums() == []
+    finally:
+        store.close()
+
+
+def test_resume_uses_persisted_index_width_for_existing_files(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        store.save_album_meta("123", "专辑", 0)
+        store.upsert_pending([
+            DownloadTask("3", "123", "第3集", Quality.STANDARD.value, 3,
+                         index_width=2),
+        ])
+        album_dir = tmp_path / "downloads" / "专辑"
+        album_dir.mkdir(parents=True)
+        existing = album_dir / "03 第3集.mp3"
+        existing.write_text("", encoding="utf-8")
+
+        sink = FakeSink()
+        uc = ResumeUseCase(FakeSource(), sink, str(tmp_path / "downloads"),
+                           store, retry=FAST)
+        results = run(uc.execute())
+        rows = _db_rows(db)
+        assert results[0].skipped == [str(existing)]
+        assert sink.writes == []
+        assert rows[0]["state"] == "done"
     finally:
         store.close()

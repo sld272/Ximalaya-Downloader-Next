@@ -2,9 +2,8 @@
 """领域逻辑单测：音质协商、命名、ID/区间解析、专辑区间筛选。"""
 import pytest
 
-from xdl.domain import (Quality, TaskState, PlayUrl, Track, Album, AlbumTrack,
-                        NamingPolicy, parse_track_id, parse_album_id, parse_range,
-                        transition_task_state)
+from xdl.domain import (Quality, PlayUrl, Track, Album, AlbumTrack,
+                        NamingPolicy, parse_track_id, parse_album_id, parse_range)
 
 
 def test_quality_negotiation_by_bitrate_and_codec():
@@ -28,24 +27,6 @@ def test_track_select():
     ])
     assert t.select(Quality.HIGH).type == "M4A_128"
     assert t.select(Quality.LOW).type == "MP3_32"
-
-
-def test_task_state_transitions():
-    assert transition_task_state(TaskState.PENDING, TaskState.DOWNLOADING) is TaskState.DOWNLOADING
-    assert transition_task_state(TaskState.DOWNLOADING, TaskState.DONE) is TaskState.DONE
-    assert transition_task_state(TaskState.DOWNLOADING, TaskState.FAILED) is TaskState.FAILED
-    assert transition_task_state(TaskState.FAILED, TaskState.PENDING,
-                                 retryable=True) is TaskState.PENDING
-
-
-@pytest.mark.parametrize("current,target", [
-    (TaskState.PENDING, TaskState.DONE),
-    (TaskState.DONE, TaskState.PENDING),
-    (TaskState.FAILED, TaskState.PENDING),
-])
-def test_task_state_rejects_illegal_transitions(current, target):
-    with pytest.raises(ValueError):
-        transition_task_state(current, target)
 
 
 def test_playurl_ext():
