@@ -126,8 +126,8 @@ class XdlApp(App):
         table.clear()
         for t in tasks:
             table.add_row(
-                _short(t.album_id), str(t.album_index or "-"), _short(t.title, 40),
-                _STATE_ICON.get(t.state, "?"), _progress(t),
+                _short(t.album_id) or "单曲", str(t.album_index or "-"),
+                _short(t.title, 40), _STATE_ICON.get(t.state, "?"), _progress(t),
             )
 
     # ---- 交互 ----
@@ -220,7 +220,8 @@ class XdlApp(App):
     def _track_worker(self, target: str, quality: str) -> None:
         try:
             path = self._facade.download_track(
-                target, quality=quality, reporter=self._reporter)
+                target, quality=quality, reporter=self._reporter,
+                cancel=self._cancel)
             self.call_from_thread(self._on_done, f"已保存: {path}")
         except XdlError as e:
             self.call_from_thread(self._on_done, f"[错误] {e}")

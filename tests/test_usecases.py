@@ -40,6 +40,13 @@ class CancelSink(FakeSink):
         raise CancelledByUser("stop")
 
 
+class _FailSink(FakeSink):
+    def write(self, url, path, reporter, cancel=None, progress_sink=None,
+              expected_total=0):
+        self.writes.append((url, path))
+        raise ApiError("下载失败")   # 默认 retryable=False
+
+
 class FakeSource:
     """behavior: track_id -> 结果序列；元素为异常实例（抛出）或 'ok'（返回 Track）。
     最后一个元素重复使用；calls 记录每个 track 调用次数。"""
@@ -76,6 +83,42 @@ def test_track_non_retryable_no_retry(tmp_path):
     with pytest.raises(AuthError):
         run(uc.execute("1", Quality.STANDARD))
     assert src.calls["1"] == 1
+
+
+def test_track_persists_task_to_store(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        uc = DownloadTrackUseCase(FakeSource(), FakeSink(), str(tmp_path),
+                                  retry=FAST, store=store)
+        run(uc.execute("7", Quality.STANDARD))
+        rows = _db_rows(db)
+        assert len(rows) == 1
+        assert rows[0]["track_id"] == "7"
+        assert rows[0]["album_id"] == ""      # 单曲无专辑
+        assert rows[0]["state"] == "done"
+        # 单曲同样出现在面板数据源里
+        assert [t.track_id for t in store.all_tasks()] == ["7"]
+    finally:
+        store.close()
+
+
+def test_track_failure_persists_as_failed(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        # 解析成功但下载抛非重试错误 → 落 failed 终态、面板可见
+        src = FakeSource()
+        uc = DownloadTrackUseCase(src, _FailSink(), str(tmp_path),
+                                  retry=FAST, store=store)
+        with pytest.raises(ApiError):
+            run(uc.execute("7", Quality.STANDARD))
+        rows = _db_rows(db)
+        assert len(rows) == 1
+        assert rows[0]["state"] == "failed"
+        assert rows[0]["retryable"] == 0
+    finally:
+        store.close()
 
 
 def test_track_retryable_exhausted(tmp_path):

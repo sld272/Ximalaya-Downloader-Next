@@ -34,13 +34,25 @@ class FakeSink:
             f.write(b"x")
 
 
-def test_login_and_track_do_not_construct_task_store(tmp_path):
+def test_login_does_not_construct_task_store(tmp_path):
     def fail_store():
-        raise AssertionError("store should be lazy")
+        raise AssertionError("login 不应构造任务库")
 
     settings = Settings(download_dir=str(tmp_path))
     app = Facade(FakeSource(), FakeSink(), settings, store_factory=fail_store)
 
     assert app.login() == "/tmp/xdl-profile"
+
+
+def test_track_tolerates_broken_store(tmp_path):
+    from xdl.errors import StorageError
+
+    def broken_store():
+        raise StorageError("任务库损坏")
+
+    settings = Settings(download_dir=str(tmp_path))
+    app = Facade(FakeSource(), FakeSink(), settings, store_factory=broken_store)
+
+    # 任务库坏了也不应挡住单曲下载（只是记不进面板）。
     path = app.download_track("1", quality="standard")
     assert path.endswith(".mp3")

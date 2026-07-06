@@ -13,6 +13,7 @@ import threading
 from collections.abc import Callable
 
 from ..domain import Quality, parse_range
+from ..errors import XdlError
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy)
@@ -44,9 +45,9 @@ class Facade:
         return self._source.interactive_login()
 
     def download_track(self, target: str, quality: str | None = None,
-                       reporter=None) -> str:
-        """下载单个音频，返回落盘路径。"""
-        return asyncio.run(self._download_track(target, quality, reporter))
+                       reporter=None, cancel: threading.Event | None = None) -> str:
+        """下载单个音频，返回落盘路径。`cancel` 供外部触发停止。"""
+        return asyncio.run(self._download_track(target, quality, reporter, cancel))
 
     def download_album(self, target: str, quality: str | None = None,
                        range_: str | None = None, reporter=None,
@@ -69,11 +70,13 @@ class Facade:
         return store.all_tasks() if store is not None else []
 
     # ---- 内部异步实现 ----
-    async def _download_track(self, target, quality, reporter) -> str:
+    async def _download_track(self, target, quality, reporter, cancel=None) -> str:
         q = Quality(quality or self._settings.default_quality)
         usecase = DownloadTrackUseCase(self._source, self._sink,
                                        self._settings.download_dir,
-                                       retry=self._retry_policy())
+                                       retry=self._retry_policy(),
+                                       store=self._optional_store(),
+                                       cancel_event=cancel)
         await self._source.open()
         try:
             return await usecase.execute(target, q, reporter)
@@ -163,6 +166,13 @@ class Facade:
         if self._store is None and self._store_factory is not None:
             self._store = self._store_factory()
         return self._store
+
+    def _optional_store(self):
+        """尽力拿任务库；坏了就返回 None，让单曲下载照常进行（记不进面板而已）。"""
+        try:
+            return self._task_store()
+        except XdlError:
+            return None
 
     def _install_sigint_handler(self, stop_event: asyncio.Event,
                                 cancel_event: threading.Event):

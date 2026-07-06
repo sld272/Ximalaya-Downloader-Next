@@ -67,15 +67,20 @@ async def _run_with_retry(fn: Callable[[], Awaitable[_T]], policy: RetryPolicy,
 
 class DownloadTrackUseCase:
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
-                 retry: RetryPolicy | None = None):
+                 retry: RetryPolicy | None = None,
+                 store: TaskStore | None = None,
+                 cancel_event: threading.Event | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
         self._retry = retry or RetryPolicy()
+        self._store = store
+        self._cancel_event = cancel_event
 
     async def execute(self, target: str, quality: Quality,
                       reporter: ProgressReporter | None = None) -> str:
         track_id = parse_track_id(target)
+        holder: dict[str, DownloadTask | None] = {"task": None}
 
         async def _do() -> str:
             track: Track = await self._source.get_track(track_id)
@@ -86,10 +91,67 @@ class DownloadTrackUseCase:
                 raise ApiError(f"未找到可用的播放地址（曲目：{track.title}）。")
             filename = NamingPolicy.track_filename(track.title, play.ext)
             target_path = os.path.join(self._download_dir, filename)
-            await asyncio.to_thread(self._sink.write, play.url, target_path, reporter)
+            # 单曲也纳入任务表：前端面板可见、进度/续传持久化（album_id 留空）。
+            task = await self._prepare_task(track_id, quality.value, track.title,
+                                            target_path, reporter)
+            holder["task"] = task
+            if task is not None and task.id is not None:
+                await self._store_call(reporter, self._store.mark_downloading, task.id)
+            await asyncio.to_thread(self._sink.write, play.url, target_path, reporter,
+                                    self._cancel_event, self._progress_sink(task), 0)
+            if task is not None and task.id is not None:
+                await self._store_call(reporter, self._store.mark_done,
+                                       task.id, target_path)
             return target_path
 
-        return await _run_with_retry(_do, self._retry, reporter)
+        try:
+            return await _run_with_retry(_do, self._retry, reporter)
+        except CancelledByUser:
+            await self._requeue(holder["task"], reporter)
+            raise
+        except XdlError as e:
+            await self._fail(holder["task"], e, reporter)
+            raise
+
+    # ---- 任务库（与专辑逐集流程一致的最小实现） ----
+    async def _prepare_task(self, track_id, quality, title, target_path, reporter):
+        if self._store is None:
+            return None
+        task = DownloadTask(track_id=track_id, album_id="", title=title,
+                            quality=quality, album_index=0, target_path=target_path)
+        rows = await self._store_call(reporter, self._store.upsert_pending, [task],
+                                      default=None)
+        return rows[0] if rows else None
+
+    async def _requeue(self, task, reporter):
+        if task is not None and task.id is not None:
+            await self._store_call(reporter, self._store.upsert_pending, [task])
+
+    async def _fail(self, task, e, reporter):
+        if task is not None and task.id is not None:
+            await self._store_call(reporter, self._store.mark_failed,
+                                   task.id, e.category, str(e), e.retryable)
+
+    async def _store_call(self, reporter, fn, *args, default=None):
+        if self._store is None:
+            return default
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as e:
+            _note(reporter, f"任务库操作失败，已继续下载：{e}")
+            return default
+
+    def _progress_sink(self, task: DownloadTask | None):
+        if self._store is None or task is None or task.id is None:
+            return None
+
+        def persist(done: int, total: int) -> None:
+            try:
+                self._store.record_progress(task.id, done, total)
+            except Exception:
+                pass
+
+        return persist
 
 
 @dataclass
