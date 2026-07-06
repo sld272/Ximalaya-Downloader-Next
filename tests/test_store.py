@@ -2,8 +2,11 @@
 """TaskStore SQLite 契约测试。"""
 import sqlite3
 
+import pytest
+
 from xdl.adapters import SqliteTaskStore
 from xdl.domain import DownloadTask, TaskState
+from xdl.errors import StorageError
 
 
 def _task(track_id="1", quality="standard", album_id="a", index=1):
@@ -114,3 +117,28 @@ def test_progress_and_album_cursor(tmp_path):
         assert store.pending_albums() == [("a", "专辑", 1)]
     finally:
         store.close()
+
+
+def test_store_wraps_connect_errors(monkeypatch, tmp_path):
+    def fail_connect(*args, **kwargs):
+        raise sqlite3.DatabaseError("broken")
+
+    monkeypatch.setattr(sqlite3, "connect", fail_connect)
+
+    with pytest.raises(StorageError, match="任务库不可用"):
+        SqliteTaskStore(str(tmp_path / "tasks.db"))
+
+
+def test_store_reports_existing_instance_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr("xdl.adapters.store_sqlite._lock_file", lambda f: False)
+
+    with pytest.raises(StorageError, match="已有 xdl 实例"):
+        SqliteTaskStore(str(tmp_path / "tasks.db"))
+
+
+def test_store_wraps_method_sqlite_errors():
+    store = SqliteTaskStore(":memory:")
+    store.close()
+
+    with pytest.raises(StorageError, match="任务库操作失败"):
+        store.pending_albums()

@@ -10,6 +10,7 @@ import asyncio
 import os
 import signal
 import threading
+from collections.abc import Callable
 
 from ..domain import Quality, parse_range
 from ..settings import Settings
@@ -18,11 +19,13 @@ from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
 
 
 class Facade:
-    def __init__(self, source, sink, settings: Settings, store=None):
+    def __init__(self, source, sink, settings: Settings, store=None,
+                 store_factory: Callable[[], object] | None = None):
         self._source = source
         self._sink = sink
         self._settings = settings
         self._store = store
+        self._store_factory = store_factory
 
     @classmethod
     def from_config(cls, settings: Settings | None = None) -> "Facade":
@@ -71,12 +74,13 @@ class Facade:
         start, end = parse_range(range_)
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
+        store = self._task_store()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
         usecase = DownloadAlbumUseCase(self._source, self._sink,
                                        self._settings.download_dir,
                                        concurrency=self._settings.max_concurrency,
                                        retry=self._retry_policy(),
-                                       store=self._store,
+                                       store=store,
                                        stop_event=stop_event,
                                        cancel_event=cancel_event)
         # 全程复用一个 Chrome 会话（共享上下文里按需开 page 并发解析）
@@ -93,13 +97,14 @@ class Facade:
             cleanup_signal()
 
     async def _resume(self, reporter) -> list[AlbumResult]:
-        if self._store is None:
+        store = self._task_store()
+        if store is None:
             return []
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
         usecase = ResumeUseCase(self._source, self._sink,
-                                self._settings.download_dir, self._store,
+                                self._settings.download_dir, store,
                                 concurrency=self._settings.max_concurrency,
                                 retry=self._retry_policy(),
                                 stop_event=stop_event,
@@ -112,6 +117,11 @@ class Facade:
             return result
         finally:
             cleanup_signal()
+
+    def _task_store(self):
+        if self._store is None and self._store_factory is not None:
+            self._store = self._store_factory()
+        return self._store
 
     def _install_sigint_handler(self, stop_event: asyncio.Event,
                                 cancel_event: threading.Event):

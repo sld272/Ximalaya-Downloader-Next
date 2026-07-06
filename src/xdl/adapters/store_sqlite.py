@@ -2,6 +2,8 @@
 """SQLite 任务库适配器。"""
 from __future__ import annotations
 
+import errno
+import functools
 import os
 import sqlite3
 import threading
@@ -9,10 +11,89 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from ..domain import DownloadTask, TaskState
+from ..errors import StorageError
+
+try:  # pragma: no cover - exercised on Unix/macOS in tests via monkeypatch.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
+try:  # pragma: no cover - Windows fallback.
+    import msvcrt
+except ImportError:  # pragma: no cover
+    msvcrt = None
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _wrap_sqlite_errors(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.Error as e:
+            raise StorageError(f"任务库操作失败: {e}") from e
+    return wrapper
+
+
+def _lock_file(f) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+    if msvcrt is not None:  # pragma: no cover
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+    return True
+
+
+def _unlock_file(f) -> None:
+    if fcntl is not None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:  # pragma: no cover
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+class _TaskDbLock:
+    def __init__(self, db_path: str):
+        self._path = os.path.join(os.path.dirname(os.path.abspath(db_path)), "xdl.lock")
+        self._file = None
+
+    def acquire(self) -> None:
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        try:
+            self._file = open(self._path, "a+b")
+        except OSError as e:
+            raise StorageError(f"任务库锁不可用: {e}") from e
+        try:
+            if not _lock_file(self._file):
+                raise StorageError("已有 xdl 实例正在运行，请等待其结束后再恢复任务。")
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
+
+    def release(self) -> None:
+        if self._file is None:
+            return
+        try:
+            _unlock_file(self._file)
+        finally:
+            self._file.close()
+            self._file = None
 
 
 def _migrate_v1(conn: sqlite3.Connection) -> None:
@@ -76,16 +157,33 @@ class SqliteTaskStore:
 
     def __init__(self, path: str):
         self._path = path
-        if path != ":memory:":
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._db_lock: _TaskDbLock | None = None
+        self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
-        with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=5000")
-            self._migrate_locked()
+        if path != ":memory:":
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            except OSError as e:
+                raise StorageError(f"任务库目录不可用: {e}") from e
+            self._db_lock = _TaskDbLock(path)
+            self._db_lock.acquire()
+        try:
+            self._conn = sqlite3.connect(path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            with self._lock:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA busy_timeout=5000")
+                self._migrate_locked()
+        except sqlite3.Error as e:
+            if self._db_lock is not None:
+                self._db_lock.release()
+            raise StorageError(f"任务库不可用: {e}") from e
+        except Exception:
+            if self._db_lock is not None:
+                self._db_lock.release()
+            raise
 
+    @_wrap_sqlite_errors
     def upsert_pending(self, tasks: list[DownloadTask]) -> list[DownloadTask]:
         if not tasks:
             return []
@@ -139,6 +237,7 @@ class SqliteTaskStore:
                     ids.append(int(cur.lastrowid))
         return self._tasks_by_ids(ids)
 
+    @_wrap_sqlite_errors
     def mark_downloading(self, task_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -152,6 +251,7 @@ class SqliteTaskStore:
                  TaskState.DONE.value),
             )
 
+    @_wrap_sqlite_errors
     def mark_done(self, task_id: int, target_path: str) -> None:
         now = _now()
         with self._lock, self._conn:
@@ -169,6 +269,7 @@ class SqliteTaskStore:
                  TaskState.DONE.value),
             )
 
+    @_wrap_sqlite_errors
     def mark_failed(self, task_id: int, category: str, msg: str,
                     retryable: bool) -> None:
         with self._lock, self._conn:
@@ -184,6 +285,7 @@ class SqliteTaskStore:
                  TaskState.DOWNLOADING.value, TaskState.FAILED.value),
             )
 
+    @_wrap_sqlite_errors
     def record_progress(self, task_id: int, bytes_done: int, total: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -197,6 +299,7 @@ class SqliteTaskStore:
                  TaskState.DOWNLOADING.value),
             )
 
+    @_wrap_sqlite_errors
     def requeue_stale(self) -> int:
         with self._lock, self._conn:
             cur = self._conn.execute(
@@ -209,6 +312,7 @@ class SqliteTaskStore:
             )
             return int(cur.rowcount)
 
+    @_wrap_sqlite_errors
     def requeue_retryable_failed(self) -> int:
         with self._lock, self._conn:
             cur = self._conn.execute(
@@ -221,6 +325,7 @@ class SqliteTaskStore:
             )
             return int(cur.rowcount)
 
+    @_wrap_sqlite_errors
     def pending_albums(self) -> list[tuple[str, str, int]]:
         with self._lock:
             rows = self._conn.execute(
@@ -239,6 +344,7 @@ class SqliteTaskStore:
         return [(str(r["album_id"]), str(r["title"]), int(r["pending_count"]))
                 for r in rows]
 
+    @_wrap_sqlite_errors
     def pending_tasks(self, album_id: str) -> list[DownloadTask]:
         with self._lock:
             rows = self._conn.execute(
@@ -251,6 +357,7 @@ class SqliteTaskStore:
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    @_wrap_sqlite_errors
     def save_album_meta(self, album_id: str, title: str, total: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -264,6 +371,7 @@ class SqliteTaskStore:
                 (album_id, title, total),
             )
 
+    @_wrap_sqlite_errors
     def save_album_cursor(self, album_id: str, cursor: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -277,6 +385,7 @@ class SqliteTaskStore:
                 (album_id, cursor, _now()),
             )
 
+    @_wrap_sqlite_errors
     def album_cursor(self, album_id: str) -> str:
         with self._lock:
             row = self._conn.execute(
@@ -285,6 +394,7 @@ class SqliteTaskStore:
             ).fetchone()
         return str(row["cursor"]) if row else ""
 
+    @_wrap_sqlite_errors
     def album_total(self, album_id: str) -> int:
         with self._lock:
             row = self._conn.execute(
@@ -293,9 +403,14 @@ class SqliteTaskStore:
             ).fetchone()
         return int(row["total_known"]) if row else 0
 
+    @_wrap_sqlite_errors
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        try:
+            with self._lock:
+                self._conn.close()
+        finally:
+            if self._db_lock is not None:
+                self._db_lock.release()
 
     def _migrate_locked(self) -> None:
         version = self._schema_version_locked()

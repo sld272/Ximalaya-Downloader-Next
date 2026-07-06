@@ -24,6 +24,8 @@ def build_facade(settings: Settings | None = None) -> Facade:
         headless=settings.chrome_headless,
     )
     sink = FileSink(http_timeout=settings.http_timeout)
-    store = SqliteTaskStore(settings.task_db_path)
 
-    return Facade(source, sink, settings, store=store)
+    def store_factory():
+        return SqliteTaskStore(settings.task_db_path)
+
+    return Facade(source, sink, settings, store_factory=store_factory)
