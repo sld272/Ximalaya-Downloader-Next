@@ -358,6 +358,14 @@ class SqliteTaskStore:
         return [self._row_to_task(r) for r in rows]
 
     @_wrap_sqlite_errors
+    def all_tasks(self) -> list[DownloadTask]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM download_task ORDER BY album_id, album_index, id"
+            ).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
+    @_wrap_sqlite_errors
     def save_album_meta(self, album_id: str, title: str, total: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(

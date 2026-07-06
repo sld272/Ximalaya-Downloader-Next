@@ -49,13 +49,24 @@ class Facade:
         return asyncio.run(self._download_track(target, quality, reporter))
 
     def download_album(self, target: str, quality: str | None = None,
-                       range_: str | None = None, reporter=None) -> AlbumResult:
-        """并发批量下载专辑，返回下载汇总。range_ 形如 '1-20' / '5-' / '-10' / '7'。"""
-        return asyncio.run(self._download_album(target, quality, range_, reporter))
+                       range_: str | None = None, reporter=None,
+                       cancel: threading.Event | None = None) -> AlbumResult:
+        """并发批量下载专辑，返回下载汇总。range_ 形如 '1-20' / '5-' / '-10' / '7'。
 
-    def resume(self, reporter=None) -> list[AlbumResult]:
-        """继续任务库中未完成的专辑下载。"""
-        return asyncio.run(self._resume(reporter))
+        `cancel` 供 GUI/TUI 从外部触发优雅停止（等价于 Ctrl-C）。
+        """
+        return asyncio.run(self._download_album(target, quality, range_, reporter,
+                                                cancel))
+
+    def resume(self, reporter=None,
+               cancel: threading.Event | None = None) -> list[AlbumResult]:
+        """继续任务库中未完成的专辑下载。`cancel` 供外部触发优雅停止。"""
+        return asyncio.run(self._resume(reporter, cancel))
+
+    def all_tasks(self):
+        """只读：返回任务库中的全部任务（供 TUI/GUI 渲染面板）。无任务库时返回 []。"""
+        store = self._task_store()
+        return store.all_tasks() if store is not None else []
 
     # ---- 内部异步实现 ----
     async def _download_track(self, target, quality, reporter) -> str:
@@ -69,13 +80,15 @@ class Facade:
         finally:
             await self._source.close()
 
-    async def _download_album(self, target, quality, range_, reporter) -> AlbumResult:
+    async def _download_album(self, target, quality, range_, reporter,
+                              cancel=None) -> AlbumResult:
         q = Quality(quality or self._settings.default_quality)
         start, end = parse_range(range_)
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
         store = self._task_store()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
+        watcher = self._watch_external_cancel(cancel, stop_event, cancel_event)
         usecase = DownloadAlbumUseCase(self._source, self._sink,
                                        self._settings.download_dir,
                                        concurrency=self._settings.max_concurrency,
@@ -94,15 +107,17 @@ class Facade:
                 result.stopped = True
             return result
         finally:
+            self._cancel_task(watcher)
             cleanup_signal()
 
-    async def _resume(self, reporter) -> list[AlbumResult]:
+    async def _resume(self, reporter, cancel=None) -> list[AlbumResult]:
         store = self._task_store()
         if store is None:
             return []
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)
+        watcher = self._watch_external_cancel(cancel, stop_event, cancel_event)
         usecase = ResumeUseCase(self._source, self._sink,
                                 self._settings.download_dir, store,
                                 concurrency=self._settings.max_concurrency,
@@ -116,7 +131,33 @@ class Facade:
                     album_result.stopped = True
             return result
         finally:
+            self._cancel_task(watcher)
             cleanup_signal()
+
+    def _watch_external_cancel(self, cancel: threading.Event | None,
+                               stop_event: asyncio.Event,
+                               cancel_event: threading.Event):
+        """把外部 threading.Event 桥接到内部的优雅停止机制。"""
+        if cancel is None:
+            return None
+
+        async def _watch() -> None:
+            try:
+                while not cancel.is_set():
+                    if stop_event.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+                stop_event.set()
+                cancel_event.set()
+            except asyncio.CancelledError:
+                pass
+
+        return asyncio.ensure_future(_watch())
+
+    @staticmethod
+    def _cancel_task(task) -> None:
+        if task is not None:
+            task.cancel()
 
     def _task_store(self):
         if self._store is None and self._store_factory is not None:
