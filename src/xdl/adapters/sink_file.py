@@ -15,6 +15,7 @@ from ..config import platform
 from ..errors import CancelledByUser, NetworkError
 
 _PROGRESS_STEP = 1024 * 1024
+_META_SUFFIX = ".meta"
 _CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 _CONTENT_RANGE_TOTAL_RE = re.compile(r"bytes\s+\*/(\d+)")
 
@@ -51,23 +52,29 @@ class FileSink:
     def _write_stream(self, url, target_path, part_path, base_headers, reporter,
                       cancel, progress_sink, expected_total) -> None:
         resume_from = os.path.getsize(part_path) if os.path.exists(part_path) else 0
-        use_range = resume_from > 0
+        validator = self._read_validator(part_path) if resume_from > 0 else None
+        if resume_from > 0 and validator is None:
+            self._discard_part(part_path)
+            resume_from = 0
+        use_range = resume_from > 0 and validator is not None
 
         while True:
             self._raise_if_cancelled(cancel)
             headers = dict(base_headers)
             if use_range:
                 headers["Range"] = f"bytes={resume_from}-"
+                headers["If-Range"] = validator
             with requests.get(url, headers=headers, stream=True,
                               timeout=self._timeout) as r:
                 if use_range and r.status_code == 416:
                     total = _content_range_total(r.headers) or expected_total
-                    if total and resume_from >= total:
+                    if total and resume_from == total:
                         self._finish_existing_part(part_path, target_path, reporter,
                                                    progress_sink, total)
                         return
                     self._discard_part(part_path)
                     resume_from = 0
+                    validator = None
                     use_range = False
                     continue
 
@@ -76,12 +83,14 @@ class FileSink:
                     if parsed is None or parsed[0] != resume_from:
                         self._discard_part(part_path)
                         resume_from = 0
+                        validator = None
                         use_range = False
                         continue
                     total = parsed[2]
                     if expected_total and total and total != expected_total:
                         self._discard_part(part_path)
                         resume_from = 0
+                        validator = None
                         use_range = False
                         continue
                     self._stream_response(r, part_path, target_path, "ab",
@@ -91,6 +100,7 @@ class FileSink:
 
                 r.raise_for_status()
                 total = int(r.headers.get("Content-Length", 0))
+                self._write_validator(part_path, r.headers)
                 self._stream_response(r, part_path, target_path, "wb", 0, total,
                                       reporter, cancel, progress_sink)
                 return
@@ -117,6 +127,7 @@ class FileSink:
         if progress_sink:
             progress_sink(done, total)
         os.replace(part_path, target_path)   # 原子落盘
+        self._discard_meta(part_path)
         if reporter:
             reporter.finish(target_path)
 
@@ -125,6 +136,7 @@ class FileSink:
         if progress_sink:
             progress_sink(total, total)
         os.replace(part_path, target_path)
+        self._discard_meta(part_path)
         if reporter:
             reporter.finish(target_path)
 
@@ -133,6 +145,31 @@ class FileSink:
             os.remove(part_path)
         except FileNotFoundError:
             pass
+        self._discard_meta(part_path)
+
+    def _discard_meta(self, part_path) -> None:
+        try:
+            os.remove(part_path + _META_SUFFIX)
+        except FileNotFoundError:
+            pass
+
+    def _read_validator(self, part_path) -> str | None:
+        try:
+            with open(part_path + _META_SUFFIX, encoding="utf-8") as f:
+                return f.read().strip() or None
+        except FileNotFoundError:
+            return None
+
+    def _write_validator(self, part_path, headers) -> None:
+        validator = headers.get("ETag") or headers.get("Last-Modified")
+        if not validator:
+            self._discard_meta(part_path)
+            return
+        meta_path = part_path + _META_SUFFIX
+        tmp_path = meta_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(validator)
+        os.replace(tmp_path, meta_path)
 
     def _raise_if_cancelled(self, cancel) -> None:
         if cancel is not None and cancel.is_set():
