@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from xdl.application.usecases import AlbumResult
-from xdl.frontends.cli import _cmd_album, _cmd_resume
+from xdl.frontends.cli import _cmd_album, _cmd_resume, _cmd_risk_report
 
 
 class FakeApp:
@@ -39,3 +39,23 @@ def test_resume_stop_prints_each_summary_before_130(capsys):
     assert code == 130
     assert "专辑《专辑》：下载 0，跳过 1，失败 0。" in captured.out
     assert "已优雅停止" in captured.err
+
+
+def test_risk_report_is_local_only(tmp_path, capsys):
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        '{"timestamp":"2026-07-11T00:00:00+00:00","track_id":"1",'
+        '"elapsed_ms":10,"outcome":"risk_control","ret":3005,'
+        '"msg":"系统繁忙","in_flight":1}\n',
+        encoding="utf-8",
+    )
+
+    code = _cmd_risk_report(None, SimpleNamespace(log=str(path)))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "总请求: 1" in captured.out
+    assert "'3005': 1" in captured.out
+    assert "平均请求速度(次/分钟)" in captured.out
+    assert "并发分组" in captured.out
+    assert "最新会话" in captured.out

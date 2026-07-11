@@ -52,6 +52,18 @@ class ApiError(XdlError):
         self.retryable = retryable
 
 
+class RiskControlError(ApiError):
+    """平台反滥用/限流响应。
+
+    与登录失效、内容未授权分开建模，调用方收到后应暂停整批请求，而不是
+    继续逐项重试。是否以及何时恢复由显式冷却/人工确认决定。
+    """
+    category = "risk_control"
+
+    def __init__(self, message: str, ret: int | None = None):
+        super().__init__(message, ret=ret, retryable=True)
+
+
 class DecodeError(XdlError):
     category = "decode"
 

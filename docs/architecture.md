@@ -109,7 +109,7 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 | `MediaSink` | 输出：落盘、断点偏移、后处理（标签/转码） |
 | `TaskStore` | 任务与历史的持久化（含断点与增量游标） |
 | `CookieJar` | 登录会话与凭据的读写持久化 |
-| `RateLimiter` | 请求速率控制（限流 + 抖动） |
+| `RateLimiter` | 请求速率控制（规划端口，MVP 尚未独立实现） |
 | `ProgressReporter` | 向前端回报进度（由前端实现） |
 | `HookBus` | 扩展事件总线（请求前 / 下载后 / 出错） |
 | `Clock` | 时间源（便于测试） |
@@ -128,15 +128,22 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 
 降级与健康度由一个组合实现统一处理，用例层只依赖 `SignProvider` 抽象，不感知具体用了哪种实现，未来也可新增实现接到链上。无头浏览器属较重依赖，按需安装而非强制打包。
 
-> **MVP 现状（与上文设想的偏差）**：当前未单独实现 `SignProvider`，而是采用「**让页面自己签名**」的方案——`ChromeSource` 加载已登录页面，由页面内的 `du_web_sdk` 自动生成 `xm-sign` 并发出 `baseInfo` 请求，适配器注入 `XHR` 钩子截获其成功响应。签名逻辑因此被隐含在音源适配器内。后续实现本地签名（Node 补环境 / 纯算）时，再把 `SignProvider` 端口抽出、接入降级链。
+> **MVP 现状（与上文设想的偏差）**：当前未单独实现 `SignProvider`，而是采用「**让页面自己签名**」的方案——`ChromeSource` 加载已登录页面，由页面内的 `du_web_sdk` 自动生成 `xm-sign` 并发出 `baseInfo` 请求，适配器通过 Playwright `response` 事件只读提取目标响应。早期版本会注入脚本改写 `XMLHttpRequest.prototype.open/send`；实测这会暴露明显的非原生函数指纹，现已删除。签名逻辑仍隐含在音源适配器内。
 >
-> **反自动化风控（重要）**：平台 `du_web_sdk` 现对 `baseInfo` 加了**自动化环境指纹检测**——由 Playwright/CDP **直接 `launch` 的 Chromium**（无论有头/无头、是否 stealth 伪装）都会被判为机器人，`baseInfo` 返回 `1001`/`3005`「系统繁忙」。实测对照：正常启动的真实 Chrome 能 `ret 0`，Playwright 启动的 Chrome 恒为 `1001`。因此 `ChromeSource` **不让 Playwright 启动浏览器**，而是自己以「干净方式」启动**真实 Chrome**（仅 `--remote-debugging-port`，不带 `--enable-automation` 等自动化标志），再用 `connect_over_cdp` 接管。登录态持久化在**专用 Chrome 用户配置目录**（取代早期 storage_state `auth.json`）。无头真实 Chrome（`--headless=new`）已验证同样可过风控。
+> **反自动化风控（重要）**：历史测试中，自己启动真实 Chrome 再用 CDP 接管比 Playwright `launch` 更可靠，但 2026-07-11 的 Chrome 150 复测已经推翻“CDP 真实 Chrome 稳定过风控”的结论：即使有头，XDL 页面也弹出大量验证码并返回 `3005`，而用户日常浏览器快速播放正常。当前可疑差异包括远程调试/CDP、专用 Profile 信誉、每曲新建页面，以及单页自动加载大量推荐 `baseInfo`。因此该适配器仍属实验性实现，不能以 UA/stealth 等伪装作为解决方案。
 >
-> **并发**：`ChromeSource` 用 **async Playwright**，在共享上下文里按需开独立 page，多集可并发解析；并发上界由用例层信号量（`max_concurrency`，默认 4）限定。实测探针：K≤6 并发、十余集无冷却连打均**未触发** `1001`，单集解析稳态 ~1.2s，K=4 端到端约 **4x** 提速。频率风控的安全网仍是错误分级退避重试（撞 `1001` 则退避冷却）。公开门面保持同步签名，内部 `asyncio.run` 收口。
+> **并发与风控**：`ChromeSource` 仍支持在共享上下文里开独立 page，但受保护的
+> `baseInfo` 默认串行（`max_concurrency=1`）。2026-07-11 复测中，单次解析成功，随后
+> K=4 的 8 次解析仅 1 次成功、7 次返回 `3005/系统繁忙`；35 秒后单次重试仍未恢复。
+> 因而旧的“K≤6 安全”结论已作废。首个 `1001` 或语义为“系统繁忙”的 `3005` 会被
+> 分类为 `RiskControlError` 并熔断整批，不进入自动失败收尾轮。结果写入最小化 JSONL
+> 供离线观测。公开门面保持同步签名，内部 `asyncio.run` 收口。
 
 ### 7.2 在线音源
 
-`XimalayaWebSource` 实现 `Source`：构造请求 → 附加鉴权与必要头部 → 经 `HttpTransport` 与 `RateLimiter` 发出 → 把响应解析为领域的 `Track` / `Album` → 用注入的 `Decoder` 处理音频地址 → 对外返回可直接使用的结果。音质在领域层协商，请求音质缺失时回退。
+规划中的 `XimalayaWebSource` 会实现 `Source` 并经 `HttpTransport` 与 `RateLimiter`
+发出请求；MVP 当前实际使用 `ChromeSource`，由真实页面发出受保护请求，代码尚无独立
+`RateLimiter`。音质在领域层协商，请求音质缺失时回退。
 
 架构允许未来挂接更多音源（都实现同一 `Source` 端口，可作为彼此的备用来源）。
 
@@ -156,7 +163,9 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 
 ### 7.5 稳健的请求策略
 
-为长期稳定运行，客户端采用克制、可配置的请求策略：可调的并发上限、带随机抖动的速率控制、按错误类型分级的退避重试。所有相关参数都可配置（见第 9 节），默认值偏保守。
+MVP 当前采用串行默认值、错误分级退避和风控熔断。批次 worker 启动前只有 0–0.3 秒
+轻微错峰，尚不等同于全局 RateLimiter；后续需要把受保护接口解析和媒体下载拆成两个
+并发域，再实现显式的最小间隔策略。
 
 ## 8. 任务引擎与可靠性
 
@@ -189,7 +198,9 @@ meta(key PK, value)              -- 缓存 / schema 版本 / 迁移
 
 ### 8.3 调度：并发 / 限速 / 重试分类
 
-引擎从任务库**分批**拉取任务（内存有界，超大专辑也不会撑爆内存），每个任务走 `解析 → 下载 → 收尾` 流水线，并发由信号量限定。每次外部调用前经过 `RateLimiter`。错误按类型分级处理：
+引擎从任务库**分批**拉取任务（内存有界，超大专辑也不会撑爆内存），每个任务走
+`解析 → 下载 → 收尾` 流水线，并发由信号量限定。MVP 尚无独立 `RateLimiter`；受保护
+请求靠默认串行和首个风控熔断控制。错误按类型分级处理：
 
 ```
 网络超时 / 5xx        → 指数退避重试（次数受限）
@@ -220,8 +231,8 @@ meta(key PK, value)              -- 缓存 / schema 版本 / 迁移
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `max_concurrency` | 4 | 下载并发数 |
-| `request_interval` | (1.0, 3.0) 秒 | 请求间隔随机区间 |
+| `max_concurrency` | 1 | 受保护播放信息解析/下载流水线并发上限；默认串行 |
+| `request_interval` | 尚未实现 | 规划中的全局请求最小间隔；不能用随机错峰替代 |
 | `cooldown` | 60 秒 | 受限后的冷却时长 |
 | `max_attempts` | 3 | 单任务最大重试次数 |
 | `global_retry_rounds` | 2 | 失败收尾轮数 |

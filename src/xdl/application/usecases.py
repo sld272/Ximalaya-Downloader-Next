@@ -17,7 +17,8 @@ from typing import Awaitable, Callable, TypeVar
 
 from ..domain import (Track, Album, AlbumTrack, DownloadTask, Quality, NamingPolicy,
                       parse_track_id, parse_album_id)
-from ..errors import XdlError, AuthError, ApiError, CancelledByUser
+from ..errors import (XdlError, AuthError, ApiError, CancelledByUser,
+                      RiskControlError)
 from ..ports import Source, MediaSink, ProgressReporter, TaskStore
 
 _EXTS = (".m4a", ".mp3")
@@ -38,7 +39,7 @@ class RetryPolicy:
     global_rounds: int = 2         # 失败收尾轮数
 
     def wait_for(self, err: XdlError, attempt: int) -> float:
-        if isinstance(err, ApiError) and getattr(err, "ret", None) == 1001:
+        if isinstance(err, RiskControlError):
             base = self.cooldown
         else:
             base = self.backoff_base * (2 ** (attempt - 1))
@@ -56,6 +57,10 @@ async def _run_with_retry(fn: Callable[[], Awaitable[_T]], policy: RetryPolicy,
             raise
         except XdlError as e:
             last = e
+            # 风控的 retryable 仅表示可以在未来的人工 resume 中恢复；当前运行
+            # 必须立即停止，不能把即时重试变成持续冲击。
+            if isinstance(e, RiskControlError):
+                raise
             if not e.retryable or attempt >= policy.max_attempts:
                 raise
             wait = policy.wait_for(e, attempt)
@@ -301,6 +306,12 @@ class DownloadAlbumUseCase:
         failures = await self._run_batch(work, quality, album_dir, width, total,
                                          reporter, result)
 
+        # 风控不是普通的逐项失败：首个信号出现后整批熔断，禁止失败收尾轮
+        # 自动重新冲击受保护接口。任务保持 retryable，可在冷却/人工确认后 resume。
+        if any(isinstance(error, RiskControlError) for _item, error in failures):
+            _note(reporter, "检测到平台风控，已熔断本批次；不会自动继续重试。")
+            return failures
+
         # 失败收尾轮：跨轮间隔后统一重试「可重试」的残余失败项。
         for rnd in range(1, self._retry.global_rounds + 1):
             if self._is_stopping():
@@ -324,10 +335,17 @@ class DownloadAlbumUseCase:
                          ) -> list[tuple[_AlbumWorkItem, XdlError]]:
         sem = asyncio.Semaphore(self._concurrency)
         failures: list[tuple[_AlbumWorkItem, XdlError]] = []
+        risk_error: list[RiskControlError] = []
 
         async def worker(item: _AlbumWorkItem) -> None:
             async with sem:
                 at = item.track
+                if risk_error:
+                    failures.append((item, RiskControlError(
+                        f"风控熔断：未继续请求（起因：{risk_error[0]}）",
+                        ret=risk_error[0].ret,
+                    )))
+                    return
                 if self._is_stopping():
                     return
                 await asyncio.sleep(random.uniform(0, 0.3))   # 轻微错峰
@@ -349,6 +367,8 @@ class DownloadAlbumUseCase:
                     await self._requeue_items([item], reporter)
                     _note(reporter, f"  ↷ {label} — 已停止，保留待恢复")
                 except XdlError as e:
+                    if isinstance(e, RiskControlError) and not risk_error:
+                        risk_error.append(e)
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_failed,
                                                item.task.id, e.category, str(e),

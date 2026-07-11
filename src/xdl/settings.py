@@ -27,11 +27,17 @@ class Settings:
     chrome_path: str = ""           # 为空则自动探测
     chrome_profile_dir: str = ""    # 专用 Chrome 用户配置目录（持久化登录态）
     task_db_path: str = ""          # 任务库（默认 ~/.xdl/tasks.db）
+    risk_log_path: str = ""         # 风控观测 JSONL（默认 ~/.xdl/risk-events.jsonl）
     cdp_port: int = 9222            # Chrome 远程调试端口
-    chrome_headless: bool = True    # 下载解析用无头真实 Chrome（登录始终有头）
+    # 默认无头静默运行（不弹窗）。无头会带 "HeadlessChrome" UA 这一自动化指纹，适配器
+    # 会在解析时通过 CDP 把它抹成正常 "Chrome" 以降低风控识别（见 source_chrome）。
+    chrome_headless: bool = True
+    # 仅在检测到图形验证码风控时，自动切到有头浏览器让用户手动通过一次，过完再回无头。
+    # headless 无法人工过验证码，这是被惩罚后唯一能恢复的路径。置 False 则遇验证码直接熔断。
+    risk_fallback_headful: bool = True
 
-    # 并发：专辑解析下载的并发上界（探测显示 K≤6 不触发频率风控，默认保守取 4）
-    max_concurrency: int = 4
+    # 受保护播放信息解析默认串行；2026-07-11 实测 K=4 已触发 3005。
+    max_concurrency: int = 1
 
     # 错误分级退避重试（见 errors.py / 架构 §8.3）
     max_attempts: int = 3              # 单任务即时重试上限
@@ -44,5 +50,7 @@ class Settings:
             self.chrome_profile_dir = os.path.join(_xdl_home(), "chrome-profile")
         if not self.task_db_path:
             self.task_db_path = os.path.join(_xdl_home(), "tasks.db")
+        if not self.risk_log_path:
+            self.risk_log_path = os.path.join(_xdl_home(), "risk-events.jsonl")
         if not self.chrome_path:
             self.chrome_path = platform.find_chrome() or ""

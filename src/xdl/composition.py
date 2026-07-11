@@ -9,6 +9,7 @@ from __future__ import annotations
 from .settings import Settings
 from .adapters import Www2Decoder, FileSink, ChromeSource, SqliteTaskStore
 from .application import Facade
+from .risk import RiskEventRecorder
 
 
 def build_facade(settings: Settings | None = None) -> Facade:
@@ -22,6 +23,8 @@ def build_facade(settings: Settings | None = None) -> Facade:
         port=settings.cdp_port,
         resolve_timeout=settings.resolve_timeout,
         headless=settings.chrome_headless,
+        risk_recorder=RiskEventRecorder(settings.risk_log_path),
+        risk_fallback_headful=settings.risk_fallback_headful,
     )
     sink = FileSink(http_timeout=settings.http_timeout)
 

@@ -43,6 +43,7 @@ xdl album <链接或ID>                     # 下载整张专辑
 xdl album <链接或ID> --range 1-20        # 只下第 1–20 集（也支持 5- / -10 / 7）
 xdl album <链接或ID> --quality high      # 指定音质：high / standard（默认）/ low
 xdl resume                              # 继续上次未完成的下载
+xdl risk-report                         # 汇总本地风控观测（不发网络请求）
 ```
 
 - **音质**：`--quality` 在可用音质间选择，缺失时自动回退。
@@ -50,6 +51,7 @@ xdl resume                              # 继续上次未完成的下载
 - **优雅停止**：下载中按 `Ctrl-C` 会存好进度再退出，`xdl resume` 可继续。
 - **下载目录**：默认 `./downloads`，可用全局参数 `--download-dir <目录>` 覆盖。
 - 任务状态持久化在 `~/.xdl/tasks.db`。
+- 受保护接口的最小化观测记录在 `~/.xdl/risk-events.jsonl`；不包含 Cookie、设备指纹或播放 URL。
 
 ## 终端面板（TUI）
 

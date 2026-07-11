@@ -11,6 +11,7 @@ import sys
 from ..application import Facade
 from ..settings import Settings
 from ..errors import XdlError, CancelledByUser
+from ..risk import summarize_risk_events
 
 
 class ConsoleProgress:
@@ -72,6 +73,28 @@ def _cmd_resume(app: Facade, args) -> int:
     return 1 if failed else 0
 
 
+def _cmd_risk_report(app: Facade, args) -> int:
+    path = args.log or Settings().risk_log_path
+    summary = summarize_risk_events(path)
+    print(f"风控观测文件: {path}")
+    print(f"总请求: {summary['total']}")
+    print(f"结果分布: {summary['outcomes']}")
+    print(f"返回码分布: {summary['ret_counts']}")
+    print(f"首次风控请求序号: {summary['first_risk_request_index']}")
+    print(f"首次风控前成功数: {summary['successes_before_first_risk']}")
+    print(f"观测到的恢复时间(秒): {summary['recovery_seconds']}")
+    print(f"观测跨度(秒): {summary['duration_seconds']}")
+    print(f"平均请求速度(次/分钟): {summary['requests_per_minute']}")
+    print(f"峰值一分钟请求量: {summary['peak_requests_per_minute']}")
+    print(f"请求间隔(秒): {summary['request_interval_seconds']}")
+    print(f"最大同时在途: {summary['max_in_flight']}")
+    print(f"并发分组: {summary['outcomes_by_in_flight']}")
+    print(f"登录态分组: {summary['outcomes_by_authentication']}")
+    print(f"最新会话: {summary['latest_session']}")
+    print(f"延迟(ms): {summary['latency_ms']}")
+    return 0
+
+
 def _print_album_result(result) -> None:
     print("\n" + result.summary())
     if result.failed:
@@ -87,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("login", help="打开浏览器登录并保存会话")
     sub.add_parser("resume", help="继续上次未完成的下载")
+    p_risk = sub.add_parser("risk-report", help="汇总本地风控观测（不发网络请求）")
+    p_risk.add_argument("--log", help="JSONL 观测文件路径")
 
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
@@ -117,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         "track": _cmd_track,
         "album": _cmd_album,
         "resume": _cmd_resume,
+        "risk-report": _cmd_risk_report,
     }
     try:
         return handlers[args.command](app, args)
