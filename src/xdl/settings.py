@@ -35,6 +35,11 @@ class Settings:
     # 仅在检测到图形验证码风控时，自动切到有头浏览器让用户手动通过一次，过完再回无头。
     # headless 无法人工过验证码，这是被惩罚后唯一能恢复的路径。置 False 则遇验证码直接熔断。
     risk_fallback_headful: bool = True
+    # 是否在每次会话启动/登录后重置设备指纹 Cookie（_xmLog / wfp / Hm_lvt_*），保留登录态。
+    # 喜马拉雅的设备风控跟 _xmLog/wfp 这一组设备标识走，不跟账号走（用户日常浏览器同账号
+    # 无风控已证明）。清除后页面 SDK 会为该 Profile 重新生成新设备 ID，等同"在新设备登录"，
+    # 摆脱旧设备上累积的验证码惩罚态。置 False 可做 A/B 对照。见 docs/risk-control-observations.md。
+    reset_device_fingerprint: bool = True
 
     # 受保护播放信息解析默认串行；2026-07-11 实测 K=4 已触发 3005。
     max_concurrency: int = 1

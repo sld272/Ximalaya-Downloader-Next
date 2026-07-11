@@ -69,6 +69,11 @@ class Facade:
         store = self._task_store()
         return store.all_tasks() if store is not None else []
 
+    def inspect_storage(self) -> dict:
+        """诊断：列出当前 Profile 的设备标识存储 key 名（不读 value），
+        验证"清 Cookie"覆盖面是否完整。只读、不下载、不重置设备指纹。"""
+        return asyncio.run(self._source.inspect_storage())
+
     # ---- 内部异步实现 ----
     async def _download_track(self, target, quality, reporter, cancel=None) -> str:
         q = Quality(quality or self._settings.default_quality)

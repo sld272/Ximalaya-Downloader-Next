@@ -151,11 +151,81 @@ Profile 已进入验证码惩罚态，无法在同一 Profile 上干净地隔离
 - 每曲新建页面导致的推荐/初始化请求扇出（见上一节）仍是请求层根因之一，尚未改动；
   后续可评估“会话内复用单页、导航切换”与“预热日常 Profile 信誉”两个方向。
 
+## 2026-07-11 设备 Cookie 差分：风控跟设备标识走、不跟账号走
+
+用户日常 Chrome 用同一账号快速连续播放无验证码，专用 Profile/CDP 同账号却进入
+验证码惩罚态。读取专用 Profile 的喜马拉雅 Cookie（仅列名称，不读 value）后定位到
+登录态与设备标识是分开存放的：
+
+| Cookie | 类别 | 备注 |
+|---|---|---|
+| `1&_token` / `1&remember_me` / `web_login` | 登录态 | httponly，账号身份 |
+| `_xmLog` | 设备标识 | 喜马拉雅日志 SDK 的设备 ID，即风控的 browser_id 载体 |
+| `wfp` | Web 指纹 | 浏览器/设备指纹 |
+| `Hm_lvt_*` / `Hm_lpvt_*` | 访问历史 | 百度统计：首次/最近访问时间戳，风控用它判设备"年龄" |
+| `tgw_l7_route` | 路由 | 负载均衡，无害 |
+
+由此可证：专用 Profile 的 `_xmLog`/`wfp`/`Hm_lvt_*` 是冷启动新生成、无日常浏览
+信誉的设备 ID，被识别为可疑自动化设备并判罚；惩罚绑定在这组设备 Cookie 上，**不
+跟随账号**（用户日常浏览器同账号无风控已排除账号绑定）。结论：保留 `1&_token`
+等登录 Cookie、只清除 `_xmLog`/`wfp`/`Hm_lvt_*` 这一组设备 Cookie，等同"在新设备
+登录同一账号"，下次访问页面时 `du_web_sdk` 会为本 Profile 重新生成新设备 ID，
+旧设备上累积的验证码惩罚态不带入新设备。这是比"整个 Profile 重登"更精准且不必
+重登的恢复路径。
+
+`xdl inspect` 实测后追加发现：用户 `resume` 在重置设备 Cookie 后成功下载 3 集又
+陷入无限图形验证码——说明 Cookie 不是设备身份的唯一载体。`localStorage` /
+`sessionStorage` / `IndexedDB` 里同样承载把"换 Cookie 后新身"再次关联到被惩罚
+身份的指纹：
+
+| 存储 | key | 备注 |
+|---|---|---|
+| localStorage | `_antispam_` | 反垃圾指纹（124B） |
+| localStorage | `crystal` | 喜马拉雅"水晶"设备指纹 SDK（256B） |
+| localStorage | `cid` | 疑似 client/device id（88B） |
+| localStorage | `assva5` / `assva6` / `cmci9xde` / `vmce9xdq` / `pmck9xge` | 反垃圾/埋点混淆键 |
+| localStorage | `Hm_lvt_*` | 百度统计首次访问时间戳镜像 |
+| sessionStorage | `Hm_lpvt_*` / `HMACCOUNT` | 百度统计本次访问/账户镜像 |
+| IndexedDB | `treasure` | 喜马拉雅埋点 SDK 库 |
+
+因此 Cookie 重置是"换身"的必要而非充分条件：只换 Cookie 不换 storage，3 集后服务
+端通过 localStorage/IndexedDB 里的旧设备指纹再次关联到被惩罚身份。需要把清理扩展
+到页面 origin 下的全部 storage。
+
+### 本轮代码调整（均不含验证码绕过，不修改页面 JS）
+
+- 新增 `Settings.reset_device_fingerprint: bool = True` 开关。
+- `ChromeSource` 在 `open()` 接管成功、`interactive_login` 验证登录后各做一次
+  **设备指纹重置**，包含两步：
+  1. **Cookie 分区清空**：取得当前全部 Cookie → 按 name 前缀 `_xmLog` / `wfp` /
+     `Hm_lvt_` / `Hm_lpvt_` 分区 → `context.clear_cookies()` 清空 → 回灌保留项
+     （登录 Cookie、`tgw_l7_route` 等无关项）。
+  2. **页面 storage 清空**：在该 origin 下开一次性页面 `goto` 首页，执行
+     `localStorage.clear()` / `sessionStorage.clear()` / 对 `indexedDB.databases()`
+     里每个库 `indexedDB.deleteDatabase()`（包括 `treasure`），随后关闭页面。
+  同步/异步两套实现分别供登录与解析使用，本会话只重置一次；任一步失败不阻断
+  另一步与正常解析。
+- 新增只读诊断 `xdl inspect`：启动浏览器，列出当前 Profile 下所有 Cookie 名、
+  localStorage / sessionStorage / IndexedDB 的 key 名与 value 长度（不读 value），
+  用于判断"清 Device Cookie"是否覆盖了所有承载设备身份的存储面。
+- `RiskEventRecorder.record` 新增可选 `device_fingerprint_reset` 字段；受保护
+  接口事件据此上报本次请求是否处于"已重置设备指纹"的会话，便于离线 A/B 对照
+  (`xdl risk-report`)：分组比较 `reset=True` vs `reset=False` 下的成功率与首次
+  风控请求序号，以验证重置后是否摆脱惩罚态。该字段仍遵守最小元数据原则，不含
+  Cookie 值或设备指纹内容。
+
+### 尚待验证
+
+- 当前专用 Profile 已进入验证码惩罚态；本轮"清 Chunk + storage 不重登"是否足以
+  摆脱惩罚需待用户下次解析的实际结果验证，不能预先宣称生效。
+- 若重置后立即高频请求新设备 ID 仍被快速判罚，则说明平台还看 IP 或账号近期活跃
+  度，需进一步降速 / 单页复用 / 复用日常 Profile 信誉。
+
 ## 持续观测
 
 受保护接口的正常使用结果会写入 `~/.xdl/risk-events.jsonl`，字段仅包括 UTC 时间、
-trackId、耗时、结果类别、ret/msg 和同时在途数，不记录 Cookie、请求头、设备指纹或
-播放 URL。
+trackId、耗时、结果类别、ret/msg、同时在途数、会话 ID、请求序号、登录态布尔与
+设备指纹重置布尔，不记录 Cookie 值、请求头、设备指纹内容或播放 URL。
 
 ```bash
 xdl risk-report

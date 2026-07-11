@@ -25,6 +25,7 @@ def build_facade(settings: Settings | None = None) -> Facade:
         headless=settings.chrome_headless,
         risk_recorder=RiskEventRecorder(settings.risk_log_path),
         risk_fallback_headful=settings.risk_fallback_headful,
+        reset_device_fingerprint=settings.reset_device_fingerprint,
     )
     sink = FileSink(http_timeout=settings.http_timeout)
 

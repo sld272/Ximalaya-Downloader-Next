@@ -6,8 +6,9 @@ import json
 import pytest
 
 from xdl.adapters.source_chrome import (ChromeSource, _has_login_cookie,
-                                        _is_captcha_url,
-                                        _parse_base_info_payload)
+                                        _is_captcha_url, _parse_base_info_payload,
+                                        _is_device_fingerprint_cookie,
+                                        _partition_device_cookies)
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       RetryPolicy)
 from xdl.domain import Album, AlbumTrack, Quality
@@ -623,3 +624,299 @@ def test_latest_session_reports_third_request_risk(tmp_path):
     assert latest["request_interval_seconds"] == {
         "min": 9.0, "p50": 9.0, "p95": 9.0, "max": 9.0,
     }
+
+
+# ---- 设备指纹重置（保留登录态、清除 _xmLog/wfp/Hm_lvt_*） ----
+
+def _cookie(name, **extra):
+    base = {"name": name, "value": "v", "domain": ".ximalaya.com",
+            "path": "/", "httpOnly": False, "secure": False,
+            "sameSite": "Lax"}
+    base.update(extra)
+    return base
+
+
+class _FakeStoragePage:
+    """对应 _CLEAR_STORAGE_JS 求值的极简替身。"""
+
+    def __init__(self, report=None):
+        self.report = report if report is not None else {
+            "localStorageCleared": 3, "sessionStorageCleared": 2,
+            "indexedDB": ["treasure"],
+        }
+        self.closed = False
+
+    async def goto(self, *_args, **_kwargs):
+        return None
+
+    async def evaluate(self, _script, *args):
+        return self.report
+
+    def evaluate_sync(self, _script, *args):
+        return self.report
+
+    def goto_sync(self, *_args, **_kwargs):
+        return None
+
+    async def close(self):
+        self.closed = True
+
+    def close_sync(self):
+        self.closed = True
+
+
+class _FakeCookieContext:
+    """Playwright BrowserContext 的极简替身，实现 cookies/clear/add/new_page。"""
+
+    def __init__(self, cookies, storage_report=None):
+        self._cookies = list(cookies)
+        self.cleared = False
+        self.added = []
+        self._storage_report = storage_report
+        self.opened_pages: list[_FakeStoragePage] = []
+
+    async def cookies(self, *_urls):
+        return [dict(c) for c in self._cookies]
+
+    async def clear_cookies(self):
+        self.cleared = True
+        self._cookies = []
+
+    async def add_cookies(self, items):
+        for c in items:
+            self.added.append(dict(c))
+            self._cookies.append(dict(c))
+
+    async def new_page(self):
+        page = _FakeStoragePage(self._storage_report)
+        self.opened_pages.append(page)
+        return page
+
+
+class _FakeCookieContextSync:
+    """同步版（供 _reset_device_cookies_sync 测试）。"""
+
+    def __init__(self, cookies, storage_report=None):
+        self._cookies = list(cookies)
+        self.cleared = False
+        self.added = []
+        self._storage_report = storage_report
+        self.opened_pages: list[_FakeStoragePage] = []
+
+    def cookies(self, *_urls):
+        return [dict(c) for c in self._cookies]
+
+    def clear_cookies(self):
+        self.cleared = True
+        self._cookies = []
+
+    def add_cookies(self, items):
+        for c in items:
+            self.added.append(dict(c))
+            self._cookies.append(dict(c))
+
+    def new_page(self):
+        page = _FakeStoragePage(self._storage_report)
+        page.evaluate = page.evaluate_sync
+        page.goto = page.goto_sync
+        page.close = page.close_sync
+        self.opened_pages.append(page)
+        return page
+
+
+def test_is_device_fingerprint_cookie_matches_known_device_names():
+    assert _is_device_fingerprint_cookie("_xmLog") is True
+    assert _is_device_fingerprint_cookie("wfp") is True
+    assert _is_device_fingerprint_cookie("Hm_lvt_4a7d8ec50cfd6af753c4f8aee3425070") is True
+    assert _is_device_fingerprint_cookie("Hm_lpvt_4a7d8ec50cfd6af753c4f8aee3425070") is True
+
+
+def test_is_device_fingerprint_cookie_keeps_login_cookies():
+    assert _is_device_fingerprint_cookie("1&_token") is False
+    assert _is_device_fingerprint_cookie("1&remember_me") is False
+    assert _is_device_fingerprint_cookie("web_login") is False
+    assert _is_device_fingerprint_cookie("tgw_l7_route") is False
+
+
+def test_partition_separates_device_from_login():
+    cookies = [
+        _cookie("1&_token", httpOnly=True),
+        _cookie("_xmLog"),
+        _cookie("wfp"),
+        _cookie("Hm_lvt_abc"),
+        _cookie("web_login"),
+    ]
+    removed, kept = _partition_device_cookies(cookies)
+    assert set(removed) == {"_xmLog", "wfp", "Hm_lvt_abc"}
+    assert {c["name"] for c in kept} == {"1&_token", "web_login"}
+
+
+def test_reset_device_cookies_drops_device_cookies_keeps_login():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContext([
+        _cookie("1&_token", httpOnly=True),
+        _cookie("1&remember_me"),
+        _cookie("web_login"),
+        _cookie("_xmLog"),
+        _cookie("wfp"),
+        _cookie("Hm_lvt_4a7d8ec50cfd6af753c4f8aee3425070"),
+        _cookie("tgw_l7_route", domain="mobile.tx.ximalaya.com", secure=True),
+    ])
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+
+    assert ctx.cleared is True
+    names = {c["name"] for c in ctx._cookies}
+    assert names == {"1&_token", "1&remember_me", "web_login", "tgw_l7_route"}
+    assert "_xmLog" not in names and "wfp" not in names
+    assert not any(n.startswith("Hm_lvt_") for n in names)
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_cookies_skipped_when_disabled():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=False)
+    ctx = _FakeCookieContext([_cookie("_xmLog"), _cookie("1&_token")])
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+
+    assert ctx.cleared is False
+    assert ctx._cookies and {c["name"] for c in ctx._cookies} == {"_xmLog", "1&_token"}
+    assert src._device_fingerprint_was_reset is False
+
+
+def test_reset_device_cookies_does_not_clear_when_no_device_cookies_but_storage_still_runs():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContext([_cookie("1&_token"), _cookie("web_login")])
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+
+    # 没有 Cookie 要删，所以不调 clear_cookies / add_cookies
+    assert ctx.cleared is False
+    # 但 storage 清理依旧执行：必须开页面清 localStorage / sessionStorage / IndexedDB
+    assert len(ctx.opened_pages) == 1
+    assert ctx.opened_pages[0].closed is True
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_cookies_clears_storage_after_cookies():
+    storage_report = {"localStorageCleared": 3, "sessionStorageCleared": 2,
+                      "indexedDB": ["treasure"]}
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContext(
+        [_cookie("_xmLog"), _cookie("1&_token"), _cookie("wfp")],
+        storage_report=storage_report,
+    )
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+
+    # 先清 Cookie
+    assert ctx.cleared is True
+    names = {c["name"] for c in ctx._cookies}
+    assert names == {"1&_token"}
+    assert "_xmLog" not in names and "wfp" not in names
+    # 再开页面清 storage
+    assert len(ctx.opened_pages) == 1
+    assert ctx.opened_pages[0].closed is True
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_cookies_sync_clears_storage_after_cookies():
+    storage_report = {"localStorageCleared": 3, "sessionStorageCleared": 2,
+                      "indexedDB": ["treasure"]}
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContextSync(
+        [_cookie("_xmLog"), _cookie("1&_token"), _cookie("wfp")],
+        storage_report=storage_report,
+    )
+
+    src._reset_device_cookies_sync(ctx)
+
+    assert ctx.cleared is True
+    names = {c["name"] for c in ctx._cookies}
+    assert names == {"1&_token"}
+    assert len(ctx.opened_pages) == 1
+    assert ctx.opened_pages[0].closed is True
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_storage_runs_even_if_cookie_clear_fails():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+
+    class _BadCookieCtx(_FakeCookieContext):
+        async def cookies(self, *_urls):
+            raise RuntimeError("cdp down")
+
+    ctx = _BadCookieCtx([_cookie("irrelevant")])
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+
+    # Cookie 清失败不应阻断 storage 清理
+    assert len(ctx.opened_pages) == 1
+    assert ctx.opened_pages[0].closed is True
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_cookies_only_runs_once_per_session():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContext([_cookie("_xmLog"), _cookie("1&_token")])
+    src._ctx = ctx
+
+    run(src._reset_device_cookies())
+    assert src._device_fingerprint_was_reset is True
+    assert ctx.cleared is True
+    first_cookies = list(ctx._cookies)
+
+    # 再次调用不应重复清空（设备 Cookie 已不在；本会话只重置一次）
+    run(src._reset_device_cookies())
+    assert ctx._cookies == first_cookies
+
+
+def test_reset_device_cookies_sync_drops_device_keeps_login():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=True)
+    ctx = _FakeCookieContextSync([
+        _cookie("1&_token", httpOnly=True),
+        _cookie("_xmLog"),
+        _cookie("wfp"),
+        _cookie("web_login"),
+    ])
+
+    src._reset_device_cookies_sync(ctx)
+
+    assert ctx.cleared is True
+    names = {c["name"] for c in ctx._cookies}
+    assert names == {"1&_token", "web_login"}
+    assert src._device_fingerprint_was_reset is True
+
+
+def test_reset_device_cookies_sync_skipped_when_disabled():
+    src = ChromeSource(_Decoder(), "chrome", "profile", reset_device_fingerprint=False)
+    ctx = _FakeCookieContextSync([_cookie("_xmLog"), _cookie("1&_token")])
+
+    src._reset_device_cookies_sync(ctx)
+
+    assert ctx.cleared is False
+    assert src._device_fingerprint_was_reset is False
+
+
+def test_risk_event_recorder_records_device_fingerprint_reset_flag(tmp_path):
+    path = tmp_path / "reset.jsonl"
+    recorder = RiskEventRecorder(str(path))
+
+    recorder.record(
+        track_id="1", elapsed_ms=100, outcome="success", in_flight=1,
+        session_id="s", request_index=1,
+        started_at="2026-07-11T00:00:00+00:00",
+        authenticated=True, device_fingerprint_reset=True,
+    )
+
+    event = json.loads(path.read_text(encoding="utf-8"))
+    assert event["device_fingerprint_reset"] is True
+    # 仍保留最小元数据原则：不含 Cookie 值 / 设备指纹内容
+    serialized = json.dumps(event).lower()
+    assert "cookie" not in serialized
+    assert "value" not in event

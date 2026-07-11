@@ -42,6 +42,30 @@ _LIST_TIMEOUT = 30
 _MAX_PAGES = 2000
 
 
+# 设备指纹 Cookie 名前缀。清除这些、保留登录 Cookie（1&_token / 1&remember_me /
+# web_login 等），等同"在新设备登录同一账号"：下次访问页面时平台 SDK 会为此该 Profile
+# 重新生成 _xmLog/wfp，Hm_lvt_* 首次访问时间戳也一并归零，旧设备上累积的验证码惩罚态
+# 不带入新设备。已通过用户日常浏览器对照确认风控跟设备而非跟账号走。见
+# docs/risk-control-observations.md 的设备 Cookie 差分。
+_DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
+
+
+def _is_device_fingerprint_cookie(name) -> bool:
+    return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
+
+
+def _partition_device_cookies(cookies):
+    """把 Cookie 列表分成（待删除的设备指纹名称, 保留的 Cookie 列表）。"""
+    removed: list[str] = []
+    kept: list[dict] = []
+    for c in cookies:
+        if _is_device_fingerprint_cookie(c.get("name")):
+            removed.append(str(c.get("name")))
+        else:
+            kept.append(c)
+    return removed, kept
+
+
 def _port_alive(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
@@ -90,6 +114,110 @@ _TRIGGER_PLAY_JS = r"""
 """
 
 
+# 诊断：列出页面侧设备标识存储的 key 名（刻意不读 value），用于判断"清 Cookie"是否
+# 已覆盖所有承载设备 ID / browser_id 的存储面。只返回 key 名 + value 长度，避免泄露。
+_INSPECT_STORAGE_JS = r"""
+async () => {
+  const out = { localStorage: [], sessionStorage: [], indexedDB: [],
+                cookieNames: [], origin: location.origin };
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      out.localStorage.push({key: k, len: (localStorage.getItem(k) || '').length});
+    }
+  } catch (e) { out.localStorageError = String(e); }
+  try {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      out.sessionStorage.push({key: k, len: (sessionStorage.getItem(k) || '').length});
+    }
+  } catch (e) { out.sessionStorageError = String(e); }
+  try {
+    if (indexedDB.databases) {
+      const dbs = await indexedDB.databases();
+      for (const db of dbs) out.indexedDB.push({name: db.name, version: db.version});
+    } else {
+      out.indexedDBNote = 'indexedDB.databases() 不可用（旧版 Chrome）';
+    }
+  } catch (e) { out.indexedDBError = String(e); }
+  try {
+    out.cookieNames = document.cookie.split(';')
+      .map(c => c.trim().split('=')[0]).filter(Boolean);
+  } catch (e) { out.cookieError = String(e); }
+  return out;
+}
+"""
+
+# 用于诊断的目标示例曲目（公开存在）
+_INSPECT_TRACK_ID = "852566950"
+
+
+# 清空页面 origin 下的 localStorage / sessionStorage / IndexedDB。专用 Profile 只用于
+# 喜马拉雅，里面没有用户原生内容，可放心清空。inspector 实测显示 localStorage 里
+# 承载设备身份/反垃圾指纹的 key 有 _antispam_ / crystal / cid / assva5 ... / cmci9xdq
+# / vmce9xdq 等，IndexedDB 里有 "treasure" 埋点 SDK 库——只清 Cookie 远远不够，
+# 服务端会通过这些 storage 内的设备指纹把"换 Cookie 后的新身"再次关联到被惩罚身份。
+_CLEAR_STORAGE_JS = r"""
+async () => {
+  const result = { localStorageCleared: 0, sessionStorageCleared: 0,
+                   indexedDB: [], indexedDBError: null };
+  try {
+    result.localStorageCleared = localStorage.length;
+    localStorage.clear();
+  } catch (e) { result.localStorageError = String(e); }
+  try {
+    result.sessionStorageCleared = sessionStorage.length;
+    sessionStorage.clear();
+  } catch (e) { result.sessionStorageError = String(e); }
+  try {
+    if (indexedDB.databases) {
+      const dbs = await indexedDB.databases();
+      for (const db of dbs) {
+        if (!db.name) continue;
+        await new Promise((resolve) => {
+          let settled = false;
+          const done = () => { if (!settled) { settled = true;
+                                              clearTimeout(t); resolve(); } };
+          const t = setTimeout(done, 3000);
+          const req = indexedDB.deleteDatabase(db.name);
+          req.onsuccess = done; req.onerror = done; req.onblocked = done;
+        });
+        result.indexedDB.push(db.name);
+      }
+    } else {
+      result.indexedDBError = "indexedDB.databases() 不可用";
+    }
+  } catch (e) { result.indexedDBError = String(e); }
+  return result;
+}
+"""
+
+
+def _cookie_summary(cookies):
+    """列 Cookie 名 + 域 + 标记，不读 value。"""
+    return [
+        {"name": c.get("name"), "domain": c.get("domain"),
+         "httpOnly": c.get("httpOnly"), "secure": c.get("secure")}
+        for c in cookies
+    ]
+
+
+def _log_reset_result(cookie_names: list[str], storage_report) -> None:
+    """格式化输出本次设备指纹重置的清理明细（不包含 Cookie/指纹值）。"""
+    parts: list[str] = []
+    if cookie_names:
+        parts.append("Cookie: " + ", ".join(cookie_names))
+    if isinstance(storage_report, dict):
+        ls = int(storage_report.get("localStorageCleared") or 0)
+        ss = int(storage_report.get("sessionStorageCleared") or 0)
+        parts.append(f"localStorage 清 {ls} 项，sessionStorage 清 {ss} 项")
+        idb = storage_report.get("indexedDB") or []
+        if idb:
+            parts.append("IndexedDB: " + ", ".join(str(x) for x in idb))
+    msg = "已重置设备指纹（保留登录态），下次访问将生成新设备标识 — " + "；".join(parts)
+    print(msg)
+
+
 def _parse_base_info_payload(url: str, body: dict, target_track_id: str):
     """从网络响应中提取目标曲目的播放信息或错误，不修改页面 JavaScript。"""
     if "baseInfo" not in url or not isinstance(body, dict):
@@ -110,7 +238,8 @@ class ChromeSource:
     def __init__(self, decoder: Decoder, chrome_path: str, profile_dir: str,
                  port: int = 9222, resolve_timeout: int = 40, headless: bool = True,
                  risk_recorder: RiskEventRecorder | None = None,
-                 risk_fallback_headful: bool = True):
+                 risk_fallback_headful: bool = True,
+                 reset_device_fingerprint: bool = True):
         self._decoder = decoder
         self._chrome_path = chrome_path
         self._profile_dir = profile_dir
@@ -120,6 +249,10 @@ class ChromeSource:
         self._risk_recorder = risk_recorder
         # 遇验证码风控时是否自动切有头让用户手动通过一次。
         self._risk_fallback_headful = risk_fallback_headful
+        # 是否在会话启动/登录后清除设备指纹 Cookie（_xmLog/wfp/Hm_lvt_*），保留登录态。
+        self._reset_device_fingerprint = bool(reset_device_fingerprint)
+        # 本会话是否已成功重置过设备指纹；用于风控事件上报与避免重复清空。
+        self._device_fingerprint_was_reset = False
         self._escalated = False
         # 一次有头等待仍没等到用户过验证码后置位，避免后续每曲都白等一个长超时。
         self._recovery_failed = False
@@ -158,6 +291,9 @@ class ChromeSource:
             )
         except Exception:
             self._authenticated = None
+        # 接管成功后重置设备指纹 Cookie（保留登录态），让下次访问生成新设备 ID，
+        # 摆脱旧设备上的验证码惩罚态。详见 _reset_device_cookies 的说明。
+        await self._reset_device_cookies()
 
     async def close(self) -> None:
         try:
@@ -180,6 +316,154 @@ class ChromeSource:
                 except Exception:
                     pass
         self._proc = self._pw = self._browser = self._ctx = None
+
+    # ---- 设备指纹重置 ----
+    async def _reset_device_cookies(self) -> None:
+        """清除专用 Profile 中的设备指纹（Cookie + storage），保留登录态。
+
+        等同"在新设备登录同一账号"：用户日常浏览器同账号无风控已证明喜马拉雅的
+        设备风控跟设备标识走、不跟账号走。`xdl inspect` 实测显示设备身份在多个
+        存储面同时落地：
+          - Cookie:   _xmLog / wfp / Hm_lvt_*
+          - localStorage:  _antispam_ / crystal / cid / assva5... / cmci9xdq / vmce9xdq
+          - IndexedDB:     treasure（喜马拉雅埋点 SDK）
+        只清 Cookie 不够——localStorage 里旧设备指纹会让"换 Cookie 后的新身"在几次
+        请求后被服务端再次关联到被惩罚身份。本方法在清 Cookie 基础上，额外开一次页面
+        访问首页、清空 origin 下 localStorage/sessionStorage/IndexedDB，让下次访问
+        时 SDK 重新生成整套新设备标识。本会话只重置一次；失败不阻断正常解析。
+        """
+        if (not self._reset_device_fingerprint
+                or self._device_fingerprint_was_reset
+                or self._ctx is None):
+            return
+        cookie_names: list[str] = []
+        try:
+            cookies = await self._ctx.cookies()
+            removed, kept = _partition_device_cookies(cookies)
+            if removed:
+                await self._ctx.clear_cookies()
+                if kept:
+                    await self._ctx.add_cookies(kept)
+                cookie_names = sorted(set(removed))
+        except Exception as e:
+            print(f"[warn] 设备 Cookie 重置失败: {e}")
+        storage_report = None
+        page = None
+        try:
+            page = await self._ctx.new_page()
+            await page.goto(platform.HOME_URL, wait_until="domcontentloaded")
+            storage_report = await page.evaluate(_CLEAR_STORAGE_JS)
+        except Exception as e:
+            print(f"[warn] 设备 Storage 重置失败: {e}")
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        self._device_fingerprint_was_reset = True
+        _log_reset_result(cookie_names, storage_report)
+
+    def _reset_device_cookies_sync(self, context) -> None:
+        """同步版（供 interactive_login 用）。语义与 _reset_device_cookies 一致：
+        清设备 Cookie + 清空页面 origin 下的 storage，保留登录态。
+        """
+        if (not self._reset_device_fingerprint
+                or self._device_fingerprint_was_reset
+                or context is None):
+            return
+        cookie_names: list[str] = []
+        try:
+            cookies = context.cookies()
+            removed, kept = _partition_device_cookies(cookies)
+            if removed:
+                context.clear_cookies()
+                if kept:
+                    context.add_cookies(kept)
+                cookie_names = sorted(set(removed))
+        except Exception as e:
+            print(f"[warn] 设备 Cookie 重置失败: {e}")
+        storage_report = None
+        page = None
+        try:
+            page = context.new_page()
+            page.goto(platform.HOME_URL, wait_until="domcontentloaded")
+            storage_report = page.evaluate(_CLEAR_STORAGE_JS)
+        except Exception as e:
+            print(f"[warn] 设备 Storage 重置失败: {e}")
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        self._device_fingerprint_was_reset = True
+        _log_reset_result(cookie_names, storage_report)
+
+    async def inspect_storage(self) -> dict:
+        """诊断：列出当前 Profile 下的设备标识存储 key 名（不读 value）。
+
+        目的：验证"只清>(_xmLog/wfp/Hm_lvt_*) Cookie"是否覆盖了喜马拉雅设备 ID 的
+        所有载体。如果 localStorage / IndexedDB 里也存在 device_id 类条目，则 Cookie
+        清除不充分，需要扩展到 storage。刻意保持只读：不触发 _reset_device_cookies、
+        不下载、不解码。返回结构只含 key 名 + value 长度，便于离线判断。
+        """
+        self._require_chrome()
+        os.makedirs(self._profile_dir, exist_ok=True)
+        launched_here = False
+        if not _port_alive(self._port):
+            self._launch_chrome(headless=True)
+            launched_here = True
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        page = None
+        browser = None
+        try:
+            browser = await pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{self._port}")
+            ctx = (browser.contexts[0] if browser.contexts
+                   else await browser.new_context())
+            cookies_before = await ctx.cookies()
+            page = await ctx.new_page()
+            report = {
+                "cookies_before": _cookie_summary(cookies_before),
+                "device_cookies_present": sorted({
+                    c.get("name") for c in cookies_before
+                    if _is_device_fingerprint_cookie(c.get("name"))
+                }),
+            }
+            await page.goto(platform.HOME_URL, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            report["home"] = await page.evaluate(_INSPECT_STORAGE_JS)
+            await page.goto(platform.SOUND_URL.format(
+                track_id=_INSPECT_TRACK_ID), wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            report["sound"] = await page.evaluate(_INSPECT_STORAGE_JS)
+            cookies_after = await ctx.cookies()
+            report["cookies_after"] = _cookie_summary(cookies_after)
+            report["cookie_names_added_by_sound_visit"] = sorted(
+                {c.get("name") for c in cookies_after}
+                - {c.get("name") for c in cookies_before}
+            )
+            return report
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            try:
+                if browser is not None:
+                    await browser.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+            if launched_here and self._proc is not None:
+                self._terminate_process(self._proc)
+                self._proc = None
 
     # ---- Source 端口：单曲（每次开独立 page，支持并发） ----
     async def get_track(self, track_id: str) -> Track:
@@ -372,6 +656,7 @@ class ChromeSource:
                         authenticated = True
                         break
             if authenticated:
+                self._reset_device_cookies_sync(context)
                 browser.close()
             return authenticated
 
@@ -677,6 +962,7 @@ class ChromeSource:
                 request_index=request_index,
                 started_at=started_at,
                 authenticated=self._authenticated,
+                device_fingerprint_reset=self._device_fingerprint_was_reset,
             )
         except OSError:
             # 观测失败不能掩盖真实的平台响应或阻断正常下载。

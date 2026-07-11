@@ -20,11 +20,12 @@ class RiskEventRecorder:
         self._lock = threading.Lock()
 
     def record(self, *, track_id: str, elapsed_ms: int, outcome: str,
-               ret: int | None = None, msg: str | None = None,
-               in_flight: int = 1, session_id: str | None = None,
-               request_index: int | None = None,
-               started_at: str | None = None,
-               authenticated: bool | None = None) -> None:
+                ret: int | None = None, msg: str | None = None,
+                in_flight: int = 1, session_id: str | None = None,
+                request_index: int | None = None,
+                started_at: str | None = None,
+                authenticated: bool | None = None,
+                device_fingerprint_reset: bool | None = None) -> None:
         event = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "track_id": str(track_id),
@@ -42,6 +43,8 @@ class RiskEventRecorder:
             event["started_at"] = str(started_at)
         if authenticated is not None:
             event["authenticated"] = bool(authenticated)
+        if device_fingerprint_reset is not None:
+            event["device_fingerprint_reset"] = bool(device_fingerprint_reset)
         parent = os.path.dirname(os.path.abspath(self.path))
         os.makedirs(parent, exist_ok=True)
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))

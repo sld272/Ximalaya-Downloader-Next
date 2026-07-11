@@ -95,6 +95,13 @@ def _cmd_risk_report(app: Facade, args) -> int:
     return 0
 
 
+def _cmd_inspect(app: Facade, args) -> int:
+    import json
+    report = app.inspect_storage()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _print_album_result(result) -> None:
     print("\n" + result.summary())
     if result.failed:
@@ -112,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("resume", help="继续上次未完成的下载")
     p_risk = sub.add_parser("risk-report", help="汇总本地风控观测（不发网络请求）")
     p_risk.add_argument("--log", help="JSONL 观测文件路径")
+    sub.add_parser("inspect", help="诊断：列出 Profile 的设备标识存储 key（不读 value）")
 
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
@@ -143,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         "album": _cmd_album,
         "resume": _cmd_resume,
         "risk-report": _cmd_risk_report,
+        "inspect": _cmd_inspect,
     }
     try:
         return handlers[args.command](app, args)
