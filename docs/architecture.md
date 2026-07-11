@@ -132,12 +132,9 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 >
 > **反自动化风控（重要）**：历史测试中，自己启动真实 Chrome 再用 CDP 接管比 Playwright `launch` 更可靠，但 2026-07-11 的 Chrome 150 复测已经推翻“CDP 真实 Chrome 稳定过风控”的结论：即使有头，XDL 页面也弹出大量验证码并返回 `3005`，而用户日常浏览器快速播放正常。当前可疑差异包括远程调试/CDP、专用 Profile 信誉、每曲新建页面，以及单页自动加载大量推荐 `baseInfo`。因此该适配器仍属实验性实现，不能以 UA/stealth 等伪装作为解决方案。
 >
-> **并发与风控**：`ChromeSource` 仍支持在共享上下文里开独立 page，但受保护的
-> `baseInfo` 默认串行（`max_concurrency=1`）。2026-07-11 复测中，单次解析成功，随后
-> K=4 的 8 次解析仅 1 次成功、7 次返回 `3005/系统繁忙`；35 秒后单次重试仍未恢复。
-> 因而旧的“K≤6 安全”结论已作废。首个 `1001` 或语义为“系统繁忙”的 `3005` 会被
-> 分类为 `RiskControlError` 并熔断整批，不进入自动失败收尾轮。结果写入最小化 JSONL
-> 供离线观测。公开门面保持同步签名，内部 `asyncio.run` 收口。
+> **2026-07-11 设备指纹重置失效、CDP 被锁定为根因**：进一步实测显示，重置设备 Cookie（`_xmLog`/`wfp`/`Hm_lvt_*`）甚至连 `localStorage`/`sessionStorage`/`IndexedDB` 一起清掉，每次仍只能下载 3 集就被服务端判罚（返回 `1001/系统繁忙`，连验证码恢复路径都不给）。逐项排除后唯一剩下的差异是 **`--remote-debugging-port` + Playwright 通过 CDP 接管** 本身——`du_web_sdk` 能从 inspector 痕迹精确识别 CDP 环境，3 集后累计扣分到阈值。详见 `docs/risk-control-observations.md`。由此"指纹伪装"这条路在 Playwright/CDP 框架内走到头；下一步治本方向是**浏览器扩展 + 本地原生消息（Native Messaging）**：扩展监听 `baseInfo` 响应经 `chrome.runtime.connectNative` 回传 XDL，XDL 完全不用 CDP。`ChromeSource` 作为失败时的备用通道保留，未来由 `ExtensionSource` 实现 `Source` 端口替代它。
+>
+> **并发与风控**：`ChromeSource` 仍支持在共享上下文里开独立 page，但受保护的`baseInfo` 默认串行（`max_concurrency=1`）。2026-07-11 复测中，单次解析成功，随后 K=4 的 8 次解析仅 1 次成功、7 次返回 `3005/系统繁忙`；35 秒后单次重试仍未恢复。因而旧的“K≤6 安全”结论已作废。首个 `1001` 或语义为“系统繁忙”的 `3005` 会被分类为 `RiskControlError` 并熔断整批，不进入自动失败收尾轮。结果写入最小化 JSONL 供离线观测。公开门面保持同步签名，内部 `asyncio.run` 收口。
 
 ### 7.2 在线音源
 
@@ -147,11 +144,9 @@ PENDING → RESOLVING → RESOLVED → DOWNLOADING → COMPLETED
 
 架构允许未来挂接更多音源（都实现同一 `Source` 端口，可作为彼此的备用来源）。
 
-> **专辑清单的取法（MVP 现状）**：`get_album` 走平台**免签的「非 v1」**接口
-> `/revision/album/getTracksList`（纯 HTTP 翻页，每页 30 条，匿名可取，含曲目 id/标题/序号），
-> 因此专辑清单不依赖浏览器与登录。注意其 `/v1/` 版本反而要 `webtk` 签名，且对自动化浏览器
-> 做环境风控（返回「当前环境异常，请使用正规浏览器」），故弃用。逐集 `playUrl` 仍走 §7.1 的
-> baseInfo 截获——专辑下载时**复用同一长驻浏览器**逐集导航解析，避免每集冷启动。
+> **下一步：`ExtensionSource`**：`ChromeSource` 的风控根因是 CDP 接管本身，不可在 Playwright/CDP 框架内消除（见 §7.1 反自动化风控备注）。下一步新增 `ExtensionSource` 作为 `Source` 端口的主实现：用户在自己的 Chrome（不启动 `--remote-debugging-port`）安装 XDL 扩展，扩展用 `chrome.webRequest.onCompleted` 监听 `baseInfo` 响应并经 `chrome.runtime.connectNative` 回传；XDL 进程跑一个 native messaging host 接收并加入任务库，下载走 `requests`。`du_web_sdk` 看到的执行环境与用户日常浏览器完全一致。`ChromeSource` 仍保留作为扩展不可用时的备用通道。
+
+> **专辑清单的取法（MVP 现状）**：`get_album` 走平台**免签的「非 v1」**接口 `/revision/album/getTracksList`（纯 HTTP 翻页，每页 30 条，匿名可取，含曲目 id/标题/序号），因此专辑清单不依赖浏览器与登录。注意其 `/v1/` 版本反而要 `webtk` 签名，且对自动化浏览器做环境风控（返回「当前环境异常，请使用正规浏览器」），故弃用。逐集 `playUrl` 仍走 §7.1 的baseInfo 截获——专辑下载时**复用同一长驻浏览器**逐集导航解析，避免每集冷启动。
 
 ### 7.3 媒体解码
 
@@ -284,7 +279,7 @@ XdlError
 
 得益于端口与适配器，常见扩展都不必改动核心：
 
-- **新增音源**：实现 `Source` 端口（如其他获取通道），在装配根注册即可，可作为现有音源的备用。
+- **新增音源**：实现 `Source` 端口（如其他获取通道），在装配根注册即可，可作为现有音源的备用。**下一步主实现**：`ExtensionSource`——浏览器扩展 + 本地原生消息（见 §7.2 的"下一步"备注），替代 `ChromeSource` 作为默认在线音源，绕开 CDP 风控根因。
 - **新增输出/后处理**：实现或包装 `MediaSink`（如自动写入音频标签、转码）。
 - **替换/新增鉴权实现**：实现 `SignProvider`，接入降级链。
 - **新增前端**：依赖 `Facade` 门面，实现 `ProgressReporter`。
