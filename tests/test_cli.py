@@ -112,6 +112,30 @@ def test_gen_sign_repeat_must_be_positive(capsys):
     assert "必须是大于 0 的整数" in capsys.readouterr().err
 
 
+def test_concurrency_must_be_positive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--concurrency", "0", "album", "123"])
+
+    assert exc.value.code == 2
+    assert "必须是大于 0 的整数" in capsys.readouterr().err
+
+
+def test_main_passes_custom_concurrency_to_settings(monkeypatch):
+    import xdl.frontends.cli as cli
+
+    captured = {}
+    app = FakeApp(album_result=AlbumResult("专辑"))
+
+    def fake_from_config(settings):
+        captured["settings"] = settings
+        return app
+
+    monkeypatch.setattr(cli.Facade, "from_config", fake_from_config)
+
+    assert main(["--concurrency", "3", "album", "123"]) == 0
+    assert captured["settings"].max_concurrency == 3
+
+
 def test_local_risk_report_does_not_build_facade(tmp_path, monkeypatch):
     path = tmp_path / "events.jsonl"
     path.write_text("", encoding="utf-8")

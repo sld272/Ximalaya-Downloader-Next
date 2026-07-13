@@ -98,7 +98,8 @@ device_info
 
 - 打开/关闭一次音源会话。
 - 将专辑曲目写入 SQLite 任务库。
-- 按 `max_concurrency` 有界调度。
+- 按 `max_concurrency` 有界调度；默认值为 `1`，CLI 可通过全局参数
+  `--concurrency N` 覆盖。
 - 将可重试失败按类型退避，将风控错误升级为批次熔断。
 - 传播用户停止信号并保留未完成任务。
 
@@ -132,7 +133,7 @@ device_info
 
 `config.paths.xdl_home()` 是用户数据目录的单一来源，默认 `~/.xdl`，可由 `XDL_HOME` 覆盖。`Settings` 使用它生成 Profile、Cookie、任务库、设备信息和风控日志路径。
 
-命令行当前只覆盖下载目录和音源后端；其他调优项通过 Python `Settings` 使用。无效后端值会快速抛出 `ConfigError`，不会静默退回 Chrome。
+命令行当前覆盖下载目录、音源后端和异步并发数。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。其他调优项通过 Python `Settings` 使用。
 
 ## 8. 测试边界
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .config import platform
 from .config.paths import xdl_home
+from .errors import ConfigError
 
 
 def _xdl_home() -> str:
@@ -61,6 +62,8 @@ class Settings:
     source_impersonate: str = "chrome146"
 
     def __post_init__(self):
+        if self.max_concurrency < 1:
+            raise ConfigError("异步并发数必须是大于 0 的整数。")
         if not self.chrome_profile_dir:
             self.chrome_profile_dir = os.path.join(_xdl_home(), "chrome-profile")
         if not self.task_db_path:

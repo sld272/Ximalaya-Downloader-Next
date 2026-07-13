@@ -47,6 +47,7 @@ xdl track <链接或ID>                    # 下载单个音频
 xdl album <链接或ID>                    # 下载整张专辑
 xdl album <链接或ID> --range 1-20       # 只下载指定区间
 xdl album <链接或ID> --quality high     # high / standard / low
+xdl --concurrency 3 album <链接或ID>     # 自定义异步并发数（默认 1）
 xdl resume                             # 恢复未完成任务
 xdl gen-sign                           # 检查本地签名链路
 xdl risk-report                        # 汇总本地风控记录，不发网络请求
@@ -56,6 +57,7 @@ xdl risk-report                        # 汇总本地风控记录，不发网络
 
 ```bash
 xdl --download-dir D:\Audio album <链接或ID>
+xdl --concurrency 3 resume
 ```
 
 默认下载目录为当前目录下的 `downloads`。
@@ -66,7 +68,8 @@ xdl --download-dir D:\Audio album <链接或ID>
 - 已存在的完整文件会跳过。
 - 未完成的 `.part` 文件支持 HTTP Range 续传。
 - 下载中按 `Ctrl-C` 会保存进度并优雅退出，之后运行 `xdl resume`。
-- 受保护播放信息默认串行请求；遇到已识别的风控信号会停止整批，不持续撞接口。
+- 专辑下载和恢复默认使用 `1` 个异步 worker；可用全局参数 `--concurrency N` 调整。
+- 提高并发会同时增加播放信息请求和媒体下载数量，可能更容易触发平台风控；遇到已识别的风控信号仍会停止整批。
 
 ## 默认 HTTP 后端
 

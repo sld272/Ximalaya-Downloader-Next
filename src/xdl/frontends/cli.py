@@ -177,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
     parser.add_argument("--source-backend", choices=["chrome", "http"],
                         help="在线音源后端：http（默认，本地 xm-sign）/ chrome（兼容回退）")
+    parser.add_argument(
+        "--concurrency", type=_positive_int, metavar="N",
+        help="专辑下载/恢复的异步并发数（默认 1；提高可能触发平台风控）",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True,
         metavar="{login,track,album,resume,gen-sign,risk-report}",
@@ -230,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         settings.download_dir = args.download_dir
     if getattr(args, "source_backend", None):
         settings.source_backend = args.source_backend
+    if args.concurrency is not None:
+        settings.max_concurrency = args.concurrency
     handlers = {
         "login": _cmd_login,
         "track": _cmd_track,

@@ -64,3 +64,10 @@ def test_unknown_source_backend_fails_fast():
 
     with pytest.raises(ConfigError, match="未知音源后端"):
         Facade.from_config(Settings(source_backend="typo"))
+
+
+def test_settings_rejects_non_positive_concurrency():
+    import pytest
+
+    with pytest.raises(ConfigError, match="并发数"):
+        Settings(max_concurrency=0)

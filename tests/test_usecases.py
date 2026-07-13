@@ -69,6 +69,11 @@ class FakeSource:
                      play_urls=[PlayUrl("MP3_64", f"http://x/{track_id}.mp3")])
 
 
+def test_album_usecase_defaults_to_single_concurrency(tmp_path):
+    uc = DownloadAlbumUseCase(FakeSource(), FakeSink(), str(tmp_path))
+    assert uc._concurrency == 1
+
+
 def test_track_retry_then_success(tmp_path):
     src = FakeSource(behavior={"1": [NetworkError("a"), NetworkError("b"), "ok"]})
     uc = DownloadTrackUseCase(src, FakeSink(), str(tmp_path), retry=FAST)

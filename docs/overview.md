@@ -43,6 +43,7 @@ CLI / TUI / Python API
 - `Ctrl-C` / TUI 停止按钮触发优雅停止。
 - 网络、签名、鉴权、API、风控和存储错误分类。
 - 有界任务调度、失败退避和失败收尾轮。
+- CLI 可通过 `--concurrency N` 调整专辑下载与恢复的异步并发数，默认保持 `1`。
 - 最小化风控事件记录与离线 `risk-report`。
 - 本地 Python `xm-sign` 实现及离线契约测试。
 - Chrome/CDP 音源兼容后端。
