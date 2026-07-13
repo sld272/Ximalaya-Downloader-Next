@@ -156,4 +156,4 @@ python -m compileall -q src tests
 
 本项目仅供学习研究。请遵守平台服务条款和相关法律法规，尊重内容创作者版权，勿用于侵权或商业用途。使用本工具产生的后果由使用者自行承担。
 
-[AGPL-3.0-or-later](./LICENSE)
+[AGPL-3.0](./LICENSE)
