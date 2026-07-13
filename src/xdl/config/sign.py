@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import os
 
+from .paths import xdl_home
+
 # du_web_sdk 内 _getDeviceKey(0) 返回的硬编码密钥
 KEY = "m9ZtRrz:qujT8@da"
 
@@ -43,21 +45,19 @@ HDAA_REPORT_URL = f"https://{HDAA_HOST}/report?v=1.2.0&e=1&c=1&r={{uuid}}"
 # du_web_sdk 当前版本号（写入 device_info.GF9）
 SDK_VERSION = "2.0.0"
 
-# xm-sign 在平台侧的有效期观察值（实测约 1 小时/数百次，见 easy-sign README）。
-# 缓存上限取保守值：30 分钟内复用，避免对每个请求都打一次 hdaa 上报。
+# 兼容旧调用方的构造参数默认值。当前实现每次使用同一次上报响应中的 cadd/sid，
+# 不再缓存响应；保留常量避免破坏从 xdl.config.sign 导入它的代码。
 SIGN_CACHE_TTL_SECONDS = 30 * 60
 
 
 def default_device_info_path() -> str:
     """存放用户提取的设备指纹 JSON 的默认路径（~/.xdl/device-info.json）。"""
-    from ..settings import _xdl_home
-    return os.path.join(_xdl_home(), "device-info.json")
+    return os.path.join(xdl_home(), "device-info.json")
 
 
 def default_cookies_cache_path() -> str:
     """从 Chrome profile 中导出的登录 Cookie 缓存路径（~/.xdl/cookies.json）。"""
-    from ..settings import _xdl_home
-    return os.path.join(_xdl_home(), "cookies.json")
+    return os.path.join(xdl_home(), "cookies.json")
 
 
 def load_default_device_info() -> dict:

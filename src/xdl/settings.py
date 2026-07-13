@@ -10,10 +10,12 @@ import os
 from dataclasses import dataclass
 
 from .config import platform
+from .config.paths import xdl_home
 
 
 def _xdl_home() -> str:
-    return os.environ.get("XDL_HOME") or os.path.join(os.path.expanduser("~"), ".xdl")
+    """兼容旧的内部导入路径；新代码使用 ``config.paths.xdl_home``。"""
+    return xdl_home()
 
 
 @dataclass
@@ -47,9 +49,9 @@ class Settings:
     global_retry_rounds: int = 2       # 失败收尾轮数
 
     # ---- 在线音源后端（见 architecture §7.1/§7.2） ----
-    # "chrome"（默认，由浏览器页面完成其自身请求流程）
-    # "http"（实验性：PySignProvider 生成 xm-sign，并从 chrome-profile 读取登录 Cookie）
-    source_backend: str = "chrome"
+    # "http"（默认：PySignProvider 本地生成 xm-sign，复用已登录 Cookie）
+    # "chrome"（兼容后端：由浏览器页面完成请求，仅用于回退与诊断）
+    source_backend: str = "http"
     # xm-sign 设备指纹 JSON（默认 ~/.xdl/device-info.json）；不存在时回退到内置模板。
     device_info_path: str = ""
     # 从 Chrome profile 提取的登录 Cookie 缓存（默认 ~/.xdl/cookies.json）。

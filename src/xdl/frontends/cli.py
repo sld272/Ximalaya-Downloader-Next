@@ -48,7 +48,8 @@ class ConsoleProgress:
 
 def _cmd_login(app: Facade, args) -> int:
     path = app.login()
-    print(f"登录态已保存到专用 Chrome 配置目录: {path}")
+    print(f"登录成功，登录态已保存: {path}")
+    print("现在可以直接运行 `xdl track`、`xdl album` 或 `xdl resume`。")
     return 0
 
 
@@ -121,7 +122,6 @@ def _cmd_gen_sign(app: Facade, args) -> int:
     signer.open()
     try:
         for i in range(args.repeat):
-            signer.invalidate_cache()
             value = signer.sign()
             print(f"[{i + 1}/{args.repeat}] xm-sign: {value}")
     finally:
@@ -176,15 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="xdl", description="喜马拉雅音频下载器")
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
     parser.add_argument("--source-backend", choices=["chrome", "http"],
-                        help="在线音源后端：chrome（默认，CDP 接管）/ http（纯 HTTP + xm-sign）")
-    sub = parser.add_subparsers(dest="command", required=True)
+                        help="在线音源后端：http（默认，本地 xm-sign）/ chrome（兼容回退）")
+    sub = parser.add_subparsers(
+        dest="command", required=True,
+        metavar="{login,track,album,resume,gen-sign,risk-report}",
+    )
 
     sub.add_parser("login", help="打开浏览器登录并保存会话")
-    sub.add_parser("resume", help="继续上次未完成的下载")
-    p_risk = sub.add_parser("risk-report", help="汇总本地风控观测（不发网络请求）")
-    p_risk.add_argument("--log", help="JSONL 观测文件路径")
-    sub.add_parser("inspect", help="诊断：列出 Profile 的设备标识存储 key（不读 value）")
-
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
     p_track.add_argument("--quality", choices=["high", "standard", "low"],
@@ -196,23 +194,27 @@ def build_parser() -> argparse.ArgumentParser:
                          help="音质（默认 standard，缺失时自动回退）")
     p_album.add_argument("--range", dest="range", metavar="区间",
                          help="下载区间，按专辑内序号：1-20 / 5- / -10 / 7（默认全部）")
+    sub.add_parser("resume", help="继续上次未完成的下载")
 
-    # 纯算 xm-sign 相关调试子命令
+    # 常用诊断：保留在一级帮助中。
     p_sign = sub.add_parser("gen-sign", help="生成 xm-sign（不发受保护请求，仅冒烟测试）")
     p_sign.add_argument("--device-info", dest="device_info",
                         help="设备指纹 JSON 路径（默认 ~/.xdl/device-info.json，不存在用内置模板）")
-    p_sign.add_argument("-n", "--repeat", type=int, default=1,
+    p_sign.add_argument("-n", "--repeat", type=_positive_int, default=1,
                         help="重复生成次数（默认 1，调试时可用 3 看是否稳定）")
+    p_risk = sub.add_parser("risk-report", help="汇总本地风控观测（不发网络请求）")
+    p_risk.add_argument("--log", help="JSONL 观测文件路径")
 
+    # 兼容保留的高级诊断命令：不再挤占主帮助，但原命令仍可调用。
+    sub.add_parser("inspect")
     p_extract = sub.add_parser(
-        "extract-device", help="从 Chrome Profile 提取 du_web_sdk 设备指纹到 JSON")
+        "extract-device")
     p_extract.add_argument("-o", "--output", help="输出路径（默认 ~/.xdl/device-info.json）")
     p_extract.add_argument("--profile", help="Chrome 用户目录（默认 ~/.xdl/chrome-profile）")
     p_extract.add_argument("--no-headless", action="store_true",
                            help="显示浏览器窗口（调试可见 SDK 加载过程）")
 
-    p_cookies = sub.add_parser(
-        "refresh-cookies", help="从 Chrome Profile 重新提取登录 Cookie 并缓存")
+    p_cookies = sub.add_parser("refresh-cookies")
     p_cookies.add_argument("--no-headless", action="store_true",
                            help="显示浏览器窗口")
 
@@ -228,8 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         settings.download_dir = args.download_dir
     if getattr(args, "source_backend", None):
         settings.source_backend = args.source_backend
-    app = Facade.from_config(settings)
-
     handlers = {
         "login": _cmd_login,
         "track": _cmd_track,
@@ -242,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
         "refresh-cookies": _cmd_refresh_cookies,
     }
     try:
+        # 本地诊断命令不需要装配下载器，避免无谓初始化 Chrome/任务库/HTTP 后端。
+        app = (Facade.from_config(settings)
+               if args.command in {"login", "track", "album", "resume", "inspect"}
+               else None)
         return handlers[args.command](app, args)
     except CancelledByUser as e:
         print(f"\n{e}", file=sys.stderr)
@@ -252,6 +256,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         return 130
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("必须是大于 0 的整数")
+    return number
 
 
 if __name__ == "__main__":

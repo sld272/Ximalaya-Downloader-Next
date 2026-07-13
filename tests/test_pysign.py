@@ -101,29 +101,26 @@ def test_pysignprovider_sign_returns_cadd_and_sid(monkeypatch):
     assert captured["verify"] is not False
 
 
-def test_pysignprovider_caches_until_ttl(monkeypatch):
-    """cadd 在 TTL 内复用；但每次 sign() 都重新打 hdaa 拿新 sid（与真 Chrome 行为一致）。"""
-    calls = {"n": 0, "sid_pool": ["s1", "s2", "s3"]}
+def test_pysignprovider_uses_cadd_and_sid_from_same_report(monkeypatch):
+    """每次签名只上报一次，并使用同一次响应中成对返回的 cadd/sid。"""
+    calls = {"n": 0}
     def fake_post(*a, **kw):
-        i = calls["n"]
-        sid = calls["sid_pool"][i] if i < len(calls["sid_pool"]) else f"s{i+1}"
         calls["n"] += 1
-        return _fake_report_response("c1", sid)
+        return _fake_report_response(f"c{calls['n']}", f"s{calls['n']}")
     import xdl.adapters.sign.py_sign as mod
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
     signer = PySignProvider(cache_ttl=60)
     signer.open()
-    first = signer.sign()      # 首次：打一次 hdaa 拿 cadd+sid，缓存 cadd
-    second = signer.sign()    # 缓存命中 cadd；再打一次 hdaa 拿新 sid
-    calls["n"] == 2  # 两次 sign -> 两次 hdaa 上报（每次新 sid）
-    calls["n"] == 2
-    assert first.split("&&")[0] == second.split("&&")[0]  # cadd 复用
-    assert first.split("&&")[1] != second.split("&&")[1]  # sid 必须不同
+    first = signer.sign()
+    second = signer.sign()
+
+    assert first == "c1&&s1"
+    assert second == "c2&&s2"
     assert calls["n"] == 2
 
 
-def test_pysignprovider_invalidate_cache_forces_refresh(monkeypatch):
+def test_pysignprovider_invalidate_cache_remains_compatible(monkeypatch):
     calls = {"n": 0}
     def fake_post(*a, **kw):
         calls["n"] += 1
@@ -137,10 +134,8 @@ def test_pysignprovider_invalidate_cache_forces_refresh(monkeypatch):
     a = signer.sign()
     signer.invalidate_cache()
     b = signer.sign()
-    # cadd 一样（同样 device_info）
-    assert a.split("&&")[0] == b.split("&&")[0]
-    # sid 不一样（每次新打 hdaa）
-    assert a.split("&&")[1] != b.split("&&")[1]
+    assert a == "cadd_fixed&&sid_1"
+    assert b == "cadd_fixed&&sid_2"
     assert calls["n"] == 2
 
 

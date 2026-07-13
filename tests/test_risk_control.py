@@ -8,8 +8,7 @@ import pytest
 
 from xdl.adapters.source_chrome import (ChromeSource, _has_login_cookie,
                                         _is_captcha_url, _parse_base_info_payload,
-                                        _is_device_fingerprint_cookie,
-                                        _partition_device_cookies)
+                                        _is_device_fingerprint_cookie)
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       RetryPolicy)
 from xdl.domain import Album, AlbumTrack, Quality
@@ -956,19 +955,6 @@ def test_is_device_fingerprint_cookie_keeps_login_cookies():
     assert _is_device_fingerprint_cookie("1&remember_me") is False
     assert _is_device_fingerprint_cookie("web_login") is False
     assert _is_device_fingerprint_cookie("tgw_l7_route") is False
-
-
-def test_partition_separates_device_from_login():
-    cookies = [
-        _cookie("1&_token", httpOnly=True),
-        _cookie("_xmLog"),
-        _cookie("wfp"),
-        _cookie("Hm_lvt_abc"),
-        _cookie("web_login"),
-    ]
-    removed, kept = _partition_device_cookies(cookies)
-    assert set(removed) == {"_xmLog", "wfp", "Hm_lvt_abc"}
-    assert {c["name"] for c in kept} == {"1&_token", "web_login"}
 
 
 def test_reset_device_cookies_drops_device_cookies_keeps_login():

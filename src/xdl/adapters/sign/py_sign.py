@@ -124,13 +124,11 @@ class PySignProvider:
             signer.close()
 
     `device_info_path` 缺省走 `config/sign.default_device_info_path()`（~/.xdl/device-info.json）；
-    文件不存在时自动回退到内置模板（`config/device_info_default.json`）。用户可用
-    `xdl extract-device` 从自己日常 Chrome 提取一份更真实的设备指纹覆盖模板。
+    文件不存在时自动回退到内置模板（`config/device_info_default.json`）。
 
-    缓存语义（关键）：实测抓真 Chrome 发的 baseInfo 请求 3 次都换新 sid、cadd 保持稳定。
-    服务端按 sid 计数：同一 sid 在短时间内重复出现 N 次会判罚。
-    因此 `sign()` **只缓存 cadd**（一次上报得来的设备身份令牌），每次都重打一次 hdaa 上报
-    拿一个新 sid 拼出新的完整 xm-sign。
+    每次 `sign()` 都只上报一次，并直接使用该次响应成对返回的 `cadd` 与 `sid`。
+    旧实现缓存 `cadd`，但为了取得新 `sid` 仍然每次上报，不仅没有减少请求，还可能在
+    服务端更新 `cadd` 时拼出不匹配的一对值，因此已取消这层无效缓存。
     """
 
     def __init__(
@@ -145,60 +143,46 @@ class PySignProvider:
         self._device_info_path = device_info_path or sign_conf.default_device_info_path()
         self._key = key
         self._report_url = report_url
-        self._cache_ttl = cache_ttl
+        # 保留 cache_ttl 参数以兼容已有调用方；当前实现不缓存签名响应。
+        _ = cache_ttl
         self._http_timeout = http_timeout
         self._user_agent = user_agent
         # 设备指纹只加载一次
         self._device_info: dict | None = None
-        # 只缓存 cadd（设备身份令牌）；sid 必须每次新打 hdaa 上报拿一个
-        self._cached_cadd: tuple[str, float] | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # ---- SignProvider 端口 ----
     def open(self) -> None:
-        if self._device_info is not None:
-            return
-        info = None
-        path = self._device_info_path
-        if path and os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    info = json.load(f)
-            except (OSError, ValueError) as e:
-                print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
-        if info is None:
-            info = sign_conf.load_default_device_info()
-        self._device_info = info
+        with self._lock:
+            if self._device_info is not None:
+                return
+            info = None
+            path = self._device_info_path
+            if path and os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        info = json.load(f)
+                except (OSError, ValueError) as e:
+                    print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
+            if info is None:
+                info = sign_conf.load_default_device_info()
+            self._device_info = info
 
     def close(self) -> None:
         with self._lock:
-            self._cached_cadd = None
-        self._device_info = None
+            self._device_info = None
 
     def sign(self) -> str:
         """返回形如 "{cadd}&&{sid}" 的 xm-sign 字符串。
 
-        每次调用都打一次 hdaa 上报拿全新 sid；cadd 在 TTL 内复用以避免每集都重算。
+        每次调用都打一次 hdaa 上报，并使用同一响应中的 cadd 与 sid。
         失败抛 `SignError`（可重试）。
         """
-        if self._device_info is None:
-            self.open()
-        now = time.time()
-        # 1) 复用未过期的 cadd（从上次上报响应里取出来存的），否则重新上报
         with self._lock:
-            cached = self._cached_cadd
-        if cached is not None and cached[1] > now:
-            cadd = cached[0]
-        else:
+            if self._device_info is None:
+                self.open()
             cadd, sid = self._fresh_report()
-            with self._lock:
-                self._cached_cadd = (cadd, time.time() + self._cache_ttl)
-            # 第一次上报可直接用本次的 sid，不必再打一次
             return f"{cadd}&&{sid}"
-        # 2) 用缓存的 cadd 再打一次 hdaa 上报拿全新 sid（真 Chrome 行为）
-        cadd2, sid = self._fresh_report()
-        # 服务端按 sid 计数；cadd 由 device_info 决定，两次的 cadd 必一致
-        return f"{cadd}&&{sid}"
 
     # ---- 内部 ----
     def _fresh_report(self) -> tuple[str, str]:
@@ -242,9 +226,7 @@ class PySignProvider:
 
     # ---- 调试辅助 ----
     def invalidate_cache(self) -> None:
-        """强制下次 sign 丢弃缓存的 cadd。供 `xdl gen-sign -n` 重复测试用。"""
-        with self._lock:
-            self._cached_cadd = None
+        """兼容旧调用方；当前签名响应不缓存，因此无需执行任何操作。"""
 
     def device_info(self) -> dict:
         if self._device_info is None:

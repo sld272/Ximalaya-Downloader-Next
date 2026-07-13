@@ -25,12 +25,16 @@ class FakeSignProvider:
         self.value = value
         self.opened = False
         self.closed = False
+        self.open_count = 0
+        self.close_count = 0
 
     def open(self) -> None:
         self.opened = True
+        self.open_count += 1
 
     def close(self) -> None:
         self.closed = True
+        self.close_count += 1
 
     def sign(self) -> str:
         return self.value
@@ -125,6 +129,42 @@ def test_http_source_open_loads_cookies_and_auth_state(monkeypatch):
     _run_async(src.open())
     assert src._cookie_header == "1&_token=tok; _xmLog=dev"
     assert src._authenticated is True
+
+
+def test_http_source_can_use_valid_cache_without_profile(monkeypatch):
+    """已有有效 Cookie 缓存时，不应强迫用户保留或重新启动 Chrome Profile。"""
+    import xdl.adapters.source_http as mod
+
+    cached = [{"name": "1&_token", "value": "tok",
+               "domain": ".ximalaya.com", "path": "/"}]
+    monkeypatch.setattr(mod, "load_cached_cookies", lambda *a, **kw: cached)
+    monkeypatch.setattr(mod.os.path, "isdir", lambda _path: False)
+    monkeypatch.setattr(
+        mod, "extract_cookies_from_profile",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应启动 Chrome")),
+    )
+    signer = FakeSignProvider()
+    src = HttpSource(
+        FakeDecoder(), signer, profile_dir="/missing/profile",
+        cookies_cache_path="/cached/cookies.json", impersonate="",
+    )
+
+    _run_async(src.open())
+
+    assert src._authenticated is True
+    assert signer.open_count == 1
+
+
+def test_http_source_reopens_signer_after_close(monkeypatch):
+    src = _make_http_source(monkeypatch)
+    signer = src._sign
+
+    _run_async(src.open())
+    _run_async(src.close())
+    _run_async(src.open())
+
+    assert signer.open_count == 2
+    assert signer.close_count == 1
 
 
 def test_http_source_open_reextracts_when_cached_cookies_are_anonymous(monkeypatch):

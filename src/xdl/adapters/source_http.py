@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实验性 HTTP 音源适配器。
+"""默认 HTTP 音源适配器。
 
 它为特定 `baseInfo` 请求填充 `xm-sign`，并读取已持久化的登录 Cookie。签名、
 认证、内容授权和服务端风控是彼此独立的判断：本模块不把任一项当作规避访问控制的
@@ -51,7 +51,7 @@ def _raise_for_ret(ret, msg, *, authenticated: bool | None = None) -> None:
     if is_busy and authenticated is False:
         raise ApiError(
             f"未登录或匿名访问被拒（ret={ret} msg={msg}）。"
-            "请先 `xdl login` 完成登录，再 `xdl refresh-cookies` 刷新登录态后重试。",
+            "请先运行 `xdl login`，登录成功后直接重试。",
             ret=ret, retryable=False,
         )
     if is_busy:
@@ -93,15 +93,15 @@ class HttpSource:
         chrome_fallback=None,
         impersonate: str = "chrome146",
     ):
-        """`impersonate` 是 curl-cffi 的可选传输配置，不建立授权，也不保证服务端接受。
+        """初始化 HTTP 音源。
 
-        非空时要求安装 curl-cffi；调用方仍必须处理认证失败和服务端风控响应。
-        """
-        """`chrome_fallback`：可选的 `ChromeSource`，用于 `interactive_login` /
+        `impersonate` 是 curl-cffi 的可选传输配置，不建立授权，也不保证服务端接受；
+        非空时要求安装 curl-cffi。`chrome_fallback` 是可选的 `ChromeSource`，用于
+        `interactive_login` /
         `inspect_storage` 这两类**与音源后端无关**的命令——它们本来就和"如何获取
         播放地址"无关（登录只是把会话落到 Chrome Profile；inspect 只是列设备
         标识 key）。`xdl login` 走它把登录态写进 ~/.xdl/chrome-profile，
-        `xdl refresh-cookies` 再从那个 Profile 提取 Cookie 给 HttpSource 用。
+        登录成功后会自动从该 Profile 导出 Cookie 给 HttpSource 使用。
         """
         self._decoder = decoder
         self._sign = sign_provider
@@ -130,15 +130,10 @@ class HttpSource:
 
     # ---- Source 端口：会话生命周期 ----
     async def open(self) -> None:
-        if self._cookies:
-            return
-        if not self._profile_dir or not os.path.isdir(self._profile_dir):
-            raise ConfigError(
-                f"未找到 Chrome Profile 目录: {self._profile_dir!r}。"
-                "请先运行 `xdl login` 创建专用 Chrome Profile。"
-            )
+        if not self._cookies:
+            await self._load_cookies()
+        # close() 后再次 open() 时必须重新打开 signer；不能只凭 Cookie 已加载就返回。
         self._sign.open()
-        await self._load_cookies()
 
     async def close(self) -> None:
         try:
@@ -155,6 +150,11 @@ class HttpSource:
             self._cookies = cached
         else:
             # 2) 缓存失效、缺失或只是匿名 Cookie：从 Profile 重读。
+            if not self._profile_dir or not os.path.isdir(self._profile_dir):
+                raise ConfigError(
+                    f"未找到 Chrome Profile 目录: {self._profile_dir!r}。"
+                    "请先运行 `xdl login` 创建并保存登录态。"
+                )
             self._cookies = await asyncio.to_thread(
                 extract_cookies_from_profile,
                 self._profile_dir,
@@ -338,8 +338,8 @@ class HttpSource:
         """打开 Chrome 完成登录、保存到专用 Profile（共用 `xdl login` 流程）。
 
         登录态与音源后端无关：HttpSource 只是从这个 Profile 提取登录 Cookie
-        —— `xdl login` 这一步仍走真实的 Chrome 浏览器（用户交互登录），画完
-        `1&_token` 后由 `xdl refresh-cookies`（或登录时自动）把 Cookie 拷到
+        —— `xdl login` 这一步仍走真实的 Chrome 浏览器（用户交互登录），取得
+        `1&_token` 后自动把 Cookie 拷到
         ~/.xdl/cookies.json 供纯 HTTP 路径复用。
         """
         if self._chrome_fallback is None:

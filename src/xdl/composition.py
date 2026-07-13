@@ -10,6 +10,7 @@ from .settings import Settings
 from .adapters import (Www2Decoder, FileSink, ChromeSource, HttpSource,
                        PySignProvider, SqliteTaskStore)
 from .application import Facade
+from .errors import ConfigError
 from .risk import RiskEventRecorder
 
 
@@ -29,7 +30,7 @@ def build_facade(settings: Settings | None = None) -> Facade:
 
 def _build_source(settings: Settings, decoder, risk_recorder):
     """按 `settings.source_backend` 装配在线音源实现。"""
-    backend = (settings.source_backend or "").strip().lower()
+    backend = (settings.source_backend or "http").strip().lower()
     if backend == "http":
         sign_provider = PySignProvider(
             device_info_path=settings.device_info_path,
@@ -60,16 +61,20 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             chrome_fallback=chrome_fallback,
             impersonate=settings.source_impersonate,
         )
-    # 默认：CDP 接管真实 Chrome（已被实测确认会触发 CDP inspector 痕迹风控，作为
-    # 兜底保留；想绕开请改 `source_backend = "http"`）。
-    return ChromeSource(
-        decoder,
-        chrome_path=settings.chrome_path,
-        profile_dir=settings.chrome_profile_dir,
-        port=settings.cdp_port,
-        resolve_timeout=settings.resolve_timeout,
-        headless=settings.chrome_headless,
-        risk_recorder=risk_recorder,
-        risk_fallback_headful=settings.risk_fallback_headful,
-        reset_device_fingerprint=settings.reset_device_fingerprint,
+    if backend == "chrome":
+        # 兼容路径：CDP 接管真实 Chrome。实测仍可能触发自动化环境风控，
+        # 因此不再作为默认下载路径。
+        return ChromeSource(
+            decoder,
+            chrome_path=settings.chrome_path,
+            profile_dir=settings.chrome_profile_dir,
+            port=settings.cdp_port,
+            resolve_timeout=settings.resolve_timeout,
+            headless=settings.chrome_headless,
+            risk_recorder=risk_recorder,
+            risk_fallback_headful=settings.risk_fallback_headful,
+            reset_device_fingerprint=settings.reset_device_fingerprint,
+        )
+    raise ConfigError(
+        f"未知音源后端 {settings.source_backend!r}；可选值为 'http' 或 'chrome'。"
     )

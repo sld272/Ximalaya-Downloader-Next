@@ -12,6 +12,27 @@ from collections import Counter
 from datetime import datetime, timezone
 
 
+def _empty_summary() -> dict:
+    """返回无观测数据时的稳定报告结构。"""
+    return {
+        "total": 0,
+        "outcomes": {},
+        "ret_counts": {},
+        "first_risk_request_index": None,
+        "recovery_seconds": [],
+        "successes_before_first_risk": 0,
+        "max_in_flight": 0,
+        "latency_ms": {},
+        "duration_seconds": 0.0,
+        "requests_per_minute": 0.0,
+        "peak_requests_per_minute": 0,
+        "request_interval_seconds": {},
+        "outcomes_by_in_flight": {},
+        "outcomes_by_authentication": {},
+        "latest_session": {},
+    }
+
+
 class RiskEventRecorder:
     """把受保护接口的结果追加为 JSONL，供离线统计。"""
 
@@ -57,16 +78,7 @@ def summarize_risk_events(path: str) -> dict:
     """汇总已有观测，不发起任何网络请求。坏行被忽略。"""
     rows: list[dict] = []
     if not path or not os.path.exists(path):
-        return {"total": 0, "outcomes": {}, "ret_counts": {},
-                "first_risk_request_index": None, "recovery_seconds": [],
-                "successes_before_first_risk": 0,
-                "max_in_flight": 0, "latency_ms": {},
-                "duration_seconds": 0.0, "requests_per_minute": 0.0,
-                "peak_requests_per_minute": 0,
-                "request_interval_seconds": {},
-                "outcomes_by_in_flight": {},
-                "outcomes_by_authentication": {},
-                "latest_session": {}}
+        return _empty_summary()
     with open(path, "r", encoding="utf-8") as stream:
         for line in stream:
             try:
@@ -75,6 +87,9 @@ def summarize_risk_events(path: str) -> dict:
                 continue
             if isinstance(row, dict):
                 rows.append(row)
+
+    if not rows:
+        return _empty_summary()
 
     outcomes = Counter(str(row.get("outcome") or "unknown") for row in rows)
     ret_counts = Counter(str(row["ret"]) for row in rows if row.get("ret") is not None)

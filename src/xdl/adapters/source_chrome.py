@@ -3,7 +3,7 @@
 
 单曲解析走「让页面自己签名」：加载已登录的 /sound 页，页面内 du_web_sdk 生成
 xm-sign 并发出 baseInfo 请求，适配器只读监听网络响应并提取目标 trackId 的结果。
-不注入或改写页面的 XHR/fetch，也不自动点击页面元素。
+不注入或改写页面的 XHR/fetch；仅在页面没有自行发起目标请求时点击播放控件。
 
 平台 du_web_sdk 对 baseInfo 有自动化环境风控。这里自己启动真实 Chrome，再用
 Playwright `connect_over_cdp` 接管，登录态持久化在专用 Profile。但 2026-07-11 复测
@@ -48,24 +48,12 @@ _MAX_PAGES = 2000
 # web_login 等），等同"在新设备登录同一账号"：下次访问页面时平台 SDK 会为此该 Profile
 # 重新生成 _xmLog/wfp，Hm_lvt_* 首次访问时间戳也一并归零，旧设备上累积的验证码惩罚态
 # 不带入新设备。已通过用户日常浏览器对照确认风控跟设备而非跟账号走。见
-# docs/risk-control-observations.md 的设备 Cookie 差分。
+# 详见历史设备 Cookie 差分记录。
 _DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
 
 
 def _is_device_fingerprint_cookie(name) -> bool:
     return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
-
-
-def _partition_device_cookies(cookies):
-    """把 Cookie 列表分成（待删除的设备指纹名称, 保留的 Cookie 列表）。"""
-    removed: list[str] = []
-    kept: list[dict] = []
-    for c in cookies:
-        if _is_device_fingerprint_cookie(c.get("name")):
-            removed.append(str(c.get("name")))
-        else:
-            kept.append(c)
-    return removed, kept
 
 
 def _port_alive(port: int) -> bool:
