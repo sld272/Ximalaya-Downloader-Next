@@ -19,6 +19,28 @@ class Decoder(Protocol):
 
 
 @runtime_checkable
+class SignProvider(Protocol):
+    """生成受保护接口请求所需的 xm-sign（见 docs/architecture.md §7.1）。
+
+    受保护接口（如 `/revision/track/v1/baseInfo`）要求请求头里带 `xm-sign`，
+    形如 ``{cadd}&&{sid}``。该端口把"如何拿到 xm-sign"这一易变点隔离起来：
+
+    - 默认实现 `PySignProvider`：纯 Python 复算 `du_web_sdk` 的签名算法
+      （device_info → zlib → AES-ECB → 上报 hdaa.shuzilm.cn → cadd&&sid），
+      不依赖浏览器、不依赖 CDP。
+    - 兜底实现可由前端按需注入（如让页面内 `du_web_sdk` 自己签、或扩展拿到）。
+    - 现状 MVP 之前 ChromeSource 走"让页面自己签名"，故未单独立实现；本端口
+      为纯 HTTP / 扩展等替代路径预留接入点。
+
+    实现应是**线程安全**或且**外部同步**使用（同步方法、内部自行加锁或每次返回新值）。
+    `sign()` 返回的字符串在平台侧有有效期，实现可自带缓存（见 PySignProvider）。
+    """
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def sign(self) -> str: ...
+
+
+@runtime_checkable
 class Source(Protocol):
     """音源：获取单曲与专辑（后续扩展搜索）。"""
     def get_track(self, track_id: str) -> Track: ...

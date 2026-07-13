@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sqlite3
 import socket
 import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -79,6 +81,40 @@ def _has_login_cookie(cookies: list[dict]) -> bool:
         and bool(cookie.get("value"))
         for cookie in cookies
     )
+
+
+def _has_persisted_login_cookie(profile_dir: str) -> bool:
+    """关闭 Chrome 后，只凭 Cookie DB 元数据确认登录 token 已落盘。
+
+    这里只查询 Cookie 名和密文长度，不读取或解密 token 值。登录流程先在 CDP 上
+    确认 Cookie 存在，再在 Chrome 正常退出后调用本函数，避免把只存在于内存中的
+    Cookie 当作已保存的登录态。
+    """
+    candidates = (
+        Path(profile_dir) / "Default" / "Network" / "Cookies",
+        Path(profile_dir) / "Default" / "Cookies",
+    )
+    for db_path in candidates:
+        if not db_path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM cookies "
+                    "WHERE name = ? "
+                    "AND (length(encrypted_value) > 0 OR length(value) > 0) "
+                    "LIMIT 1",
+                    ("1&_token",),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is not None:
+                return True
+        except sqlite3.Error:
+            # 旧 Chrome 的表结构、损坏 Profile 或仍被占用的 DB 均不应被误判为已保存。
+            continue
+    return False
 
 
 # 仅认「主动发起的图形验证挑战」信号（GeeTest v4 的 load / 惩罚接口）。刻意不含
@@ -318,6 +354,45 @@ class ChromeSource:
         self._proc = self._pw = self._browser = self._ctx = None
 
     # ---- 设备指纹重置 ----
+    @staticmethod
+    async def _delete_device_cookies_via_cdp_async(session, cookies):
+        """通过 CDP `Network.deleteCookie` 异步删除指定 cookies，返回被删的名称列表。"""
+        removed = []
+        for c in cookies:
+            if _is_device_fingerprint_cookie(c.get("name")):
+                try:
+                    await session.send("Network.deleteCookie", {
+                        "name": c.get("name", ""),
+                        "domain": c.get("domain", ""),
+                        "path": c.get("path", "/"),
+                    })
+                    removed.append(str(c.get("name")))
+                except Exception:
+                    pass
+        return sorted(set(removed))
+
+    @classmethod
+    def _delete_device_cookies_via_cdp(cls, session, cookies):
+        """同步版本：用 CDP `Network.deleteCookie` 逐个删设备指纹 Cookie。
+
+        `Network.deleteCookie` 直接操作 Chrome 的 Cookie 数据库中对应行，不影响其他
+        Cookie，登录态始终留在磁盘上。原先用 `clear_cookies()` 会有以下问题：删除落盘
+        后重加只在内存，`browser.close()` 来不及刷盘导致 `1&_token` 丢失。
+        """
+        removed = []
+        for c in cookies:
+            if _is_device_fingerprint_cookie(c.get("name")):
+                try:
+                    session.send("Network.deleteCookie", {
+                        "name": c.get("name", ""),
+                        "domain": c.get("domain", ""),
+                        "path": c.get("path", "/"),
+                    })
+                    removed.append(str(c.get("name")))
+                except Exception:
+                    pass
+        return sorted(set(removed))
+
     async def _reset_device_cookies(self) -> None:
         """清除专用 Profile 中的设备指纹（Cookie + storage），保留登录态。
 
@@ -337,22 +412,23 @@ class ChromeSource:
                 or self._ctx is None):
             return
         cookie_names: list[str] = []
-        try:
-            cookies = await self._ctx.cookies()
-            removed, kept = _partition_device_cookies(cookies)
-            if removed:
-                await self._ctx.clear_cookies()
-                if kept:
-                    await self._ctx.add_cookies(kept)
-                cookie_names = sorted(set(removed))
-        except Exception as e:
-            print(f"[warn] 设备 Cookie 重置失败: {e}")
-        storage_report = None
         page = None
         try:
             page = await self._ctx.new_page()
-            await page.goto(platform.HOME_URL, wait_until="domcontentloaded")
-            storage_report = await page.evaluate(_CLEAR_STORAGE_JS)
+            client = await page.context.new_cdp_session(page)
+            await client.send("Network.enable")
+            cookies = await self._ctx.cookies()
+            cookie_names = await self._delete_device_cookies_via_cdp_async(client, cookies)
+        except Exception as e:
+            import os
+            if os.environ.get("XDL_DEBUG_RESET"):
+                raise
+            print(f"[warn] 设备 Cookie 重置失败: {e}")
+        storage_report = None
+        try:
+            if page is not None:
+                await page.goto(platform.HOME_URL, wait_until="domcontentloaded")
+                storage_report = await page.evaluate(_CLEAR_STORAGE_JS)
         except Exception as e:
             print(f"[warn] 设备 Storage 重置失败: {e}")
         finally:
@@ -373,22 +449,20 @@ class ChromeSource:
                 or context is None):
             return
         cookie_names: list[str] = []
-        try:
-            cookies = context.cookies()
-            removed, kept = _partition_device_cookies(cookies)
-            if removed:
-                context.clear_cookies()
-                if kept:
-                    context.add_cookies(kept)
-                cookie_names = sorted(set(removed))
-        except Exception as e:
-            print(f"[warn] 设备 Cookie 重置失败: {e}")
-        storage_report = None
         page = None
         try:
             page = context.new_page()
-            page.goto(platform.HOME_URL, wait_until="domcontentloaded")
-            storage_report = page.evaluate(_CLEAR_STORAGE_JS)
+            client = page.context.new_cdp_session(page)
+            client.send("Network.enable")
+            cookies = context.cookies()
+            cookie_names = self._delete_device_cookies_via_cdp(client, cookies)
+        except Exception as e:
+            print(f"[warn] 设备 Cookie 重置失败: {e}")
+        storage_report = None
+        try:
+            if page is not None:
+                page.goto(platform.HOME_URL, wait_until="domcontentloaded")
+                storage_report = page.evaluate(_CLEAR_STORAGE_JS)
         except Exception as e:
             print(f"[warn] 设备 Storage 重置失败: {e}")
         finally:
@@ -603,6 +677,7 @@ class ChromeSource:
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
         verified = False
+        closed_cleanly = False
         try:
             for _ in range(75):
                 if _port_alive(self._port):
@@ -618,14 +693,21 @@ class ChromeSource:
                     print("未检测到专用 Chrome 的登录状态，请在该窗口继续登录后重试。")
         finally:
             # 验证成功时 _verify_interactive_login 已通过 CDP 正常关闭浏览器，
-            # 给 Chrome 时间刷盘。异常/中断时才使用终止作为兜底。
+            # 只等待其退出，异常/中断时才使用终止作为兜底。
             if verified:
                 try:
                     proc.wait(timeout=10)
+                    closed_cleanly = True
                 except Exception:
                     self._terminate_process(proc)
             else:
                 self._terminate_process(proc)
+        if not closed_cleanly:
+            raise NetworkError("Chrome 未能正常退出，无法确认登录态是否已持久化。")
+        if not _has_persisted_login_cookie(self._profile_dir):
+            raise AuthError(
+                "登录 token 未持久化到专用 Chrome Profile；请重新登录后再试。"
+            )
         return self._profile_dir
 
     def _verify_interactive_login(self) -> bool:
@@ -640,23 +722,7 @@ class ChromeSource:
                 return False
             context = contexts[0]
             authenticated = _has_login_cookie(context.cookies(platform.BASE))
-            if not authenticated:
-                for page in context.pages:
-                    if "ximalaya.com" not in page.url:
-                        continue
-                    state = page.evaluate("""() => {
-                      const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-                      const els = [...document.querySelectorAll('a,button,span,div')];
-                      const logout = els.filter(el => visible(el) && /退出登录|退出账号/.test((el.textContent || '').trim())).length;
-                      const profileLinks = [...document.querySelectorAll('a[href]')]
-                        .filter(el => visible(el) && /\\/user\\/|\\/profile|\\/account/.test(el.getAttribute('href') || '')).length;
-                      return { logout, profileLinks };
-                    }""")
-                    if state.get("logout") or state.get("profileLinks"):
-                        authenticated = True
-                        break
             if authenticated:
-                self._reset_device_cookies_sync(context)
                 browser.close()
             return authenticated
 

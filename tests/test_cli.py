@@ -2,8 +2,12 @@
 """CLI 行为测试。"""
 from types import SimpleNamespace
 
+import pytest
+
 from xdl.application.usecases import AlbumResult
-from xdl.frontends.cli import _cmd_album, _cmd_resume, _cmd_risk_report
+from xdl.errors import AuthError
+from xdl.frontends.cli import (_cmd_album, _cmd_refresh_cookies, _cmd_resume,
+                               _cmd_risk_report)
 
 
 class FakeApp:
@@ -59,3 +63,25 @@ def test_risk_report_is_local_only(tmp_path, capsys):
     assert "平均请求速度(次/分钟)" in captured.out
     assert "并发分组" in captured.out
     assert "最新会话" in captured.out
+
+
+def test_refresh_cookies_without_token_fails_without_overwriting_cache(monkeypatch):
+    import xdl.adapters.sign as sign
+    import xdl.frontends.cli as cli
+
+    settings = SimpleNamespace(
+        chrome_profile_dir="profile",
+        chrome_path="chrome",
+        cookies_cache_path="cookies.json",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(sign, "extract_cookies_from_profile", lambda **_kw: [
+        {"name": "_xmLog", "value": "anonymous"},
+    ])
+    saved = []
+    monkeypatch.setattr(sign, "save_cookies", lambda *args: saved.append(args))
+
+    with pytest.raises(AuthError, match="未发现登录 token"):
+        _cmd_refresh_cookies(None, SimpleNamespace(no_headless=False))
+
+    assert saved == []

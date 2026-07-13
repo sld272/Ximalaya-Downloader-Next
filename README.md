@@ -77,13 +77,36 @@ app.resume()
 
 ## 关于风控（务必读）
 
-喜马拉雅对**逐集播放信息接口**（`baseInfo`）做了自动化环境风控。本工具当前用 Playwright 通过 CDP 接管真实 Chrome 来获取播放地址，**实测每次会话通常只能下载约 3 集就会被服务端判定为自动化环境并返回 `系统繁忙`，本工具会立即熔断整批、不会持续重试**。在此过程中：
+喜马拉雅对**逐集播放信息接口**（`baseInfo`）存在服务端风控。本工具检测到风险信号会立即熔断整批、不会持续重试。历史观测只能说明特定账号、IP、时段与环境下的现象，不能推出固定的请求次数、恢复时长或通行方案。
 
-- 你**自己的日常浏览器**用同一账号快速连续播放不会触发风控——这是已知现象，根因在于 CDP 接管本身留下的 inspector 痕迹，无法在 Playwright/CDP 框架内消除。
-- 工具会在每次会话启动/登录后**自动重置设备指纹 Cookie 与 localStorage / sessionStorage / IndexedDB**（保留登录态），但这只能换来短暂的"新设备"蜜月，不解决"3 集后又被识别"。用 `xdl inspect` 可看到这些设备标识存储的 key 名（不读 value），用 `xdl risk-report` 可查看历次熔断与恢复时序。
-- 下一步治本方向是改用**浏览器扩展 + 本地原生消息**：让 `du_web_sdk` 跑在你日常真实浏览器里，XDL 只被动接收播放地址。
+- 日常浏览器与 CDP 自动化的差异是一个待观测变量，不应被视为可通过客户端手段消除的固定规则。
+- 旧的设备状态重置实验已默认关闭，且登录流程绝不调用它；它既不是登录恢复，也不是风控恢复方案。
+- 本项目不提供规避平台反自动化或访问控制的实现。请使用平台提供的 API、下载/导出能力，或取得必要授权。
 
 完整的观测记录与差分证据见 [`docs/risk-control-observations.md`](./docs/risk-control-observations.md)。
+
+### `xm-sign` HTTP 后端（`--source-backend http`，实验性）
+
+该后端为特定 `baseInfo` 请求提供签名字段；它不替代登录 Cookie，也不保证服务端接受请求或免除风控。签名生成仍会访问设备上报服务取得动态字段，因此不是完全离线功能。
+
+- 本地单元测试只验证载荷与响应解析，不等价于真实服务端验收。
+
+  ```bash
+  xdl gen-sign -n 3         # 签名连通性探测：会访问上报服务
+  ```
+- 切到 HTTP 后端前，先运行 `xdl login`。只有在 Chrome 已关闭且专用 Profile 中仍能确认 `1&_token` 时，登录才会成功；无 token 的导出不会覆盖已有 Cookie 缓存：
+
+  ```bash
+  xdl login                                            # 一次性，登录态持久化在 ~/.xdl/chrome-profile
+  xdl --source-backend http track <链接或ID>            # 单曲
+  xdl --source-backend http album <链接或ID>            # 整张专辑
+  xdl --source-backend http resume                     # 续传
+  xdl refresh-cookies                                  # Cookie 失效后手动再刷一次
+  ```
+- `xdl gen-sign`、`xdl risk-report` 等诊断命令与音源后端无关，直接运行即可。
+- `xm-sign` 最多满足某个请求的签名要求；它不通用于其他接口令牌（例如 `webtk`），也不解决认证、内容授权或服务端风控。
+- `chrome`（默认）与 `http` 两条路径共存于装配根（`composition.py`），随时可用
+  `--source-backend` 切换；HTTP 路径应只用于获授权的使用场景。
 
 ## 免责声明
 

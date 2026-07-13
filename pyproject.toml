@@ -12,6 +12,8 @@ license = { text = "AGPL-3.0-or-later" }
 dependencies = [
     "requests>=2.28",
     "playwright>=1.40",
+    "pycryptodome>=3.15",
+    "curl-cffi>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +26,9 @@ xdl-tui = "xdl.frontends.tui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"xdl.config" = ["*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
