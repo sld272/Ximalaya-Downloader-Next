@@ -2,8 +2,13 @@
 """CLI 行为测试。"""
 from types import SimpleNamespace
 
+import pytest
+
 from xdl.application.usecases import AlbumResult
-from xdl.frontends.cli import _cmd_album, _cmd_resume, _cmd_risk_report
+from xdl.errors import AuthError
+from xdl.frontends.cli import (_cmd_album, _cmd_refresh_cookies, _cmd_resume,
+                               _cmd_risk_report, build_parser, main)
+from xdl.settings import Settings
 
 
 class FakeApp:
@@ -59,3 +64,88 @@ def test_risk_report_is_local_only(tmp_path, capsys):
     assert "平均请求速度(次/分钟)" in captured.out
     assert "并发分组" in captured.out
     assert "最新会话" in captured.out
+
+
+def test_refresh_cookies_without_token_fails_without_overwriting_cache(monkeypatch):
+    import xdl.adapters.sign as sign
+    import xdl.frontends.cli as cli
+
+    settings = SimpleNamespace(
+        chrome_profile_dir="profile",
+        chrome_path="chrome",
+        cookies_cache_path="cookies.json",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(sign, "extract_cookies_from_profile", lambda **_kw: [
+        {"name": "_xmLog", "value": "anonymous"},
+    ])
+    saved = []
+    monkeypatch.setattr(sign, "save_cookies", lambda *args: saved.append(args))
+
+    with pytest.raises(AuthError, match="未发现登录 token"):
+        _cmd_refresh_cookies(None, SimpleNamespace(no_headless=False))
+
+    assert saved == []
+
+
+def test_default_backend_is_local_xm_sign():
+    assert Settings().source_backend == "http"
+
+
+def test_main_help_focuses_on_normal_user_flow(capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "{login,track,album,resume,gen-sign,risk-report}" in output
+    assert "extract-device" not in output
+    assert "refresh-cookies" not in output
+    assert "inspect" not in output
+
+
+def test_gen_sign_repeat_must_be_positive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["gen-sign", "-n", "0"])
+
+    assert exc.value.code == 2
+    assert "必须是大于 0 的整数" in capsys.readouterr().err
+
+
+def test_concurrency_must_be_positive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--concurrency", "0", "album", "123"])
+
+    assert exc.value.code == 2
+    assert "必须是大于 0 的整数" in capsys.readouterr().err
+
+
+def test_main_passes_custom_concurrency_to_settings(monkeypatch):
+    import xdl.frontends.cli as cli
+
+    captured = {}
+    app = FakeApp(album_result=AlbumResult("专辑"))
+
+    def fake_from_config(settings):
+        captured["settings"] = settings
+        return app
+
+    monkeypatch.setattr(cli.Facade, "from_config", fake_from_config)
+
+    assert main(["--concurrency", "3", "album", "123"]) == 0
+    assert captured["settings"].max_concurrency == 3
+
+
+def test_local_risk_report_does_not_build_facade(tmp_path, monkeypatch):
+    path = tmp_path / "events.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    import xdl.frontends.cli as cli
+    monkeypatch.setattr(
+        cli.Facade, "from_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("本地报告不应装配下载器")
+        ),
+    )
+
+    assert main(["risk-report", "--log", str(path)]) == 0

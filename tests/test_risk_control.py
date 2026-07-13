@@ -2,18 +2,19 @@
 import asyncio
 import builtins
 import json
+import sqlite3
 
 import pytest
 
 from xdl.adapters.source_chrome import (ChromeSource, _has_login_cookie,
                                         _is_captcha_url, _parse_base_info_payload,
-                                        _is_device_fingerprint_cookie,
-                                        _partition_device_cookies)
+                                        _is_device_fingerprint_cookie)
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       RetryPolicy)
 from xdl.domain import Album, AlbumTrack, Quality
 from xdl.errors import ApiError, AuthError, RiskControlError
 from xdl.risk import RiskEventRecorder, summarize_risk_events
+from xdl.settings import Settings
 
 
 def run(coro):
@@ -23,6 +24,55 @@ def run(coro):
 class _Decoder:
     def decode(self, value):
         return value
+
+
+def _patch_login_playwright(monkeypatch, cookies, pages=()):
+    """替换同步 Playwright，返回可检查根 CDP 关闭请求的最小 browser。"""
+    import playwright.sync_api as sync_api
+
+    class _Context:
+        def __init__(self):
+            self.pages = list(pages)
+
+        def cookies(self, *_urls):
+            return list(cookies)
+
+    class _Browser:
+        def __init__(self):
+            self.contexts = [_Context()]
+            self.closed = False
+            self.root_cdp_commands = []
+
+        def close(self):
+            self.closed = True
+
+        def new_browser_cdp_session(self):
+            browser = self
+
+            class _RootSession:
+                def send(self, method):
+                    browser.root_cdp_commands.append(method)
+
+            return _RootSession()
+
+    browser = _Browser()
+
+    class _Chromium:
+        def connect_over_cdp(self, _url):
+            return browser
+
+    class _Playwright:
+        chromium = _Chromium()
+
+    class _Manager:
+        def __enter__(self):
+            return _Playwright()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: _Manager())
+    return browser
 
 
 @pytest.mark.parametrize("ret,msg", [
@@ -385,6 +435,80 @@ def test_login_cookie_detection_only_requires_token_name_and_value():
     ]) is False
 
 
+def test_persisted_login_cookie_check_reads_cookie_database_metadata_only(tmp_path):
+    """登录成功必须能在关闭 Chrome 后从 Cookie DB 看到 token 条目。"""
+    from xdl.adapters import source_chrome as mod
+
+    db_dir = tmp_path / "Default" / "Network"
+    db_dir.mkdir(parents=True)
+    db_path = db_dir / "Cookies"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE cookies (name TEXT, encrypted_value BLOB, value TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO cookies VALUES (?, ?, ?)",
+            ("1&_token", b"encrypted-token", ""),
+        )
+
+    assert mod._has_persisted_login_cookie(str(tmp_path)) is True
+
+
+def test_persisted_login_cookie_check_accepts_plaintext_cookie_storage(tmp_path):
+    """兼容没有加密值、但仍有非空明文值的旧 Cookie DB。"""
+    from xdl.adapters import source_chrome as mod
+
+    db_dir = tmp_path / "Default" / "Network"
+    db_dir.mkdir(parents=True)
+    with sqlite3.connect(db_dir / "Cookies") as conn:
+        conn.execute(
+            "CREATE TABLE cookies (name TEXT, encrypted_value BLOB, value TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO cookies VALUES (?, ?, ?)",
+            ("1&_token", b"", "plaintext-token"),
+        )
+
+    assert mod._has_persisted_login_cookie(str(tmp_path)) is True
+
+
+def test_login_verification_rejects_dom_only_state(monkeypatch):
+    """页面里泛化的 profile 链接不能替代 token Cookie。"""
+    class _Page:
+        url = "https://www.ximalaya.com/"
+
+        def evaluate(self, _script):
+            return {"logout": 0, "profileLinks": 1}
+
+    browser = _patch_login_playwright(monkeypatch, [], pages=[_Page()])
+    source = ChromeSource(_Decoder(), "chrome", "profile")
+
+    assert source._verify_interactive_login() is False
+    assert browser.closed is False
+
+
+def test_login_verification_never_resets_profile_state(monkeypatch):
+    """即使显式启用旧诊断开关，登录成功路径也不能修改 Profile。"""
+    browser = _patch_login_playwright(
+        monkeypatch, [{"name": "1&_token", "value": "present"}],
+    )
+    source = ChromeSource(
+        _Decoder(), "chrome", "profile", reset_device_fingerprint=True,
+    )
+    reset_calls = []
+    monkeypatch.setattr(source, "_reset_device_cookies_sync",
+                        lambda _context: reset_calls.append(True))
+
+    assert source._verify_interactive_login() is True
+    assert browser.root_cdp_commands == ["Browser.close"]
+    assert browser.closed is False
+    assert reset_calls == []
+
+
+def test_device_fingerprint_reset_is_disabled_by_default():
+    assert Settings().reset_device_fingerprint is False
+
+
 def test_interactive_login_reprompts_until_verified(tmp_path, monkeypatch):
     chrome = tmp_path / "chrome.exe"
     chrome.write_bytes(b"")
@@ -422,6 +546,10 @@ def test_interactive_login_reprompts_until_verified(tmp_path, monkeypatch):
         source, "_verify_interactive_login",
         lambda: next(verifications), raising=False,
     )
+    monkeypatch.setattr(
+        "xdl.adapters.source_chrome._has_persisted_login_cookie",
+        lambda _profile_dir: True, raising=False,
+    )
 
     assert source.interactive_login() == str(tmp_path / "profile")
     assert len(prompts) == 2
@@ -429,6 +557,38 @@ def test_interactive_login_reprompts_until_verified(tmp_path, monkeypatch):
     assert _has_login_cookie([
         {"name": "1&_token", "value": ""},
     ]) is False
+
+
+def test_interactive_login_rejects_unpersisted_token(tmp_path, monkeypatch):
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    source = ChromeSource(_Decoder(), str(chrome), str(tmp_path / "profile"))
+
+    class _Process:
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    port_states = iter([False, True])
+    monkeypatch.setattr("xdl.adapters.source_chrome.subprocess.Popen",
+                        lambda *a, **kw: _Process())
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: next(port_states))
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "")
+    monkeypatch.setattr(source, "_verify_interactive_login",
+                        lambda: True, raising=False)
+    monkeypatch.setattr(
+        "xdl.adapters.source_chrome._has_persisted_login_cookie",
+        lambda _profile_dir: False, raising=False,
+    )
+
+    with pytest.raises(AuthError, match="未持久化"):
+        source.interactive_login()
 
 
 class _RiskSource:
@@ -645,6 +805,7 @@ class _FakeStoragePage:
             "indexedDB": ["treasure"],
         }
         self.closed = False
+        self.context = None  # 由 _FakeCookieContext.new_page 注入
 
     async def goto(self, *_args, **_kwargs):
         return None
@@ -665,8 +826,52 @@ class _FakeStoragePage:
         self.closed = True
 
 
+class _FakeCdpSession:
+    """极简 CDP session 替身：记录 Network.deleteCookie 调用，从 context 的 cookies
+    里直接删掉对应条目，模拟 CDP 删特定 Cookie 的行为。"""
+
+    def __init__(self, context):
+        self._context = context
+        self.enabled = False
+        self.deleted_names: list[str] = []
+
+    async def send(self, method, params=None):
+        if method == "Network.enable":
+            self.enabled = True
+            return
+        if method == "Network.deleteCookie":
+            name = params.get("name", "")
+            domain = params.get("domain", "")
+            path = params.get("path", "/")
+            self.deleted_names.append(name)
+            self._context._cookies = [
+                c for c in self._context._cookies
+                if not (c.get("name") == name and
+                        c.get("domain") == domain and
+                        c.get("path", "/") == path)
+            ]
+
+
+class _FakeCdpSessionSync(_FakeCdpSession):
+    def send(self, method, params=None):
+        if method == "Network.enable":
+            self.enabled = True
+            return
+        if method == "Network.deleteCookie":
+            name = params.get("name", "")
+            domain = params.get("domain", "")
+            path = params.get("path", "/")
+            self.deleted_names.append(name)
+            self._context._cookies = [
+                c for c in self._context._cookies
+                if not (c.get("name") == name and
+                        c.get("domain") == domain and
+                        c.get("path", "/") == path)
+            ]
+
+
 class _FakeCookieContext:
-    """Playwright BrowserContext 的极简替身，实现 cookies/clear/add/new_page。"""
+    """Playwright BrowserContext 的极简替身，实现 cookies/new_page/new_cdp_session。"""
 
     def __init__(self, cookies, storage_report=None):
         self._cookies = list(cookies)
@@ -674,6 +879,7 @@ class _FakeCookieContext:
         self.added = []
         self._storage_report = storage_report
         self.opened_pages: list[_FakeStoragePage] = []
+        self.cdp_sessions: list[_FakeCdpSession] = []
 
     async def cookies(self, *_urls):
         return [dict(c) for c in self._cookies]
@@ -689,8 +895,14 @@ class _FakeCookieContext:
 
     async def new_page(self):
         page = _FakeStoragePage(self._storage_report)
+        page.context = self
         self.opened_pages.append(page)
         return page
+
+    async def new_cdp_session(self, _page):
+        session = _FakeCdpSession(self)
+        self.cdp_sessions.append(session)
+        return session
 
 
 class _FakeCookieContextSync:
@@ -702,6 +914,7 @@ class _FakeCookieContextSync:
         self.added = []
         self._storage_report = storage_report
         self.opened_pages: list[_FakeStoragePage] = []
+        self.cdp_sessions: list[_FakeCdpSessionSync] = []
 
     def cookies(self, *_urls):
         return [dict(c) for c in self._cookies]
@@ -720,8 +933,14 @@ class _FakeCookieContextSync:
         page.evaluate = page.evaluate_sync
         page.goto = page.goto_sync
         page.close = page.close_sync
+        page.context = self
         self.opened_pages.append(page)
         return page
+
+    def new_cdp_session(self, _page):
+        session = _FakeCdpSessionSync(self)
+        self.cdp_sessions.append(session)
+        return session
 
 
 def test_is_device_fingerprint_cookie_matches_known_device_names():
@@ -736,19 +955,6 @@ def test_is_device_fingerprint_cookie_keeps_login_cookies():
     assert _is_device_fingerprint_cookie("1&remember_me") is False
     assert _is_device_fingerprint_cookie("web_login") is False
     assert _is_device_fingerprint_cookie("tgw_l7_route") is False
-
-
-def test_partition_separates_device_from_login():
-    cookies = [
-        _cookie("1&_token", httpOnly=True),
-        _cookie("_xmLog"),
-        _cookie("wfp"),
-        _cookie("Hm_lvt_abc"),
-        _cookie("web_login"),
-    ]
-    removed, kept = _partition_device_cookies(cookies)
-    assert set(removed) == {"_xmLog", "wfp", "Hm_lvt_abc"}
-    assert {c["name"] for c in kept} == {"1&_token", "web_login"}
 
 
 def test_reset_device_cookies_drops_device_cookies_keeps_login():
@@ -766,7 +972,11 @@ def test_reset_device_cookies_drops_device_cookies_keeps_login():
 
     run(src._reset_device_cookies())
 
-    assert ctx.cleared is True
+    # CDP deleteCookie 应被调用，没调 clear_cookies（保留登录态在磁盘上）
+    assert len(ctx.cdp_sessions) >= 1
+    session = ctx.cdp_sessions[0]
+    assert session.enabled
+    assert set(session.deleted_names) == {"_xmLog", "wfp", "Hm_lvt_4a7d8ec50cfd6af753c4f8aee3425070"}
     names = {c["name"] for c in ctx._cookies}
     assert names == {"1&_token", "1&remember_me", "web_login", "tgw_l7_route"}
     assert "_xmLog" not in names and "wfp" not in names
@@ -814,7 +1024,8 @@ def test_reset_device_cookies_clears_storage_after_cookies():
     run(src._reset_device_cookies())
 
     # 先清 Cookie
-    assert ctx.cleared is True
+    assert len(ctx.cdp_sessions) == 1
+    assert set(ctx.cdp_sessions[0].deleted_names) == {"_xmLog", "wfp"}
     names = {c["name"] for c in ctx._cookies}
     assert names == {"1&_token"}
     assert "_xmLog" not in names and "wfp" not in names
@@ -835,7 +1046,8 @@ def test_reset_device_cookies_sync_clears_storage_after_cookies():
 
     src._reset_device_cookies_sync(ctx)
 
-    assert ctx.cleared is True
+    assert len(ctx.cdp_sessions) == 1
+    assert set(ctx.cdp_sessions[0].deleted_names) == {"_xmLog", "wfp"}
     names = {c["name"] for c in ctx._cookies}
     assert names == {"1&_token"}
     assert len(ctx.opened_pages) == 1
@@ -868,7 +1080,7 @@ def test_reset_device_cookies_only_runs_once_per_session():
 
     run(src._reset_device_cookies())
     assert src._device_fingerprint_was_reset is True
-    assert ctx.cleared is True
+    assert len(ctx.cdp_sessions) == 1
     first_cookies = list(ctx._cookies)
 
     # 再次调用不应重复清空（设备 Cookie 已不在；本会话只重置一次）
@@ -887,7 +1099,8 @@ def test_reset_device_cookies_sync_drops_device_keeps_login():
 
     src._reset_device_cookies_sync(ctx)
 
-    assert ctx.cleared is True
+    assert len(ctx.cdp_sessions) == 1
+    assert set(ctx.cdp_sessions[0].deleted_names) == {"_xmLog", "wfp"}
     names = {c["name"] for c in ctx._cookies}
     assert names == {"1&_token", "web_login"}
     assert src._device_fingerprint_was_reset is True

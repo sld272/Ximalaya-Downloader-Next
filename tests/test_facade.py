@@ -5,6 +5,7 @@ import os
 from xdl.application import Facade
 from xdl.domain import Track, PlayUrl
 from xdl.settings import Settings
+from xdl.errors import ConfigError
 
 
 class FakeSource:
@@ -56,3 +57,17 @@ def test_track_tolerates_broken_store(tmp_path):
     # 任务库坏了也不应挡住单曲下载（只是记不进面板）。
     path = app.download_track("1", quality="standard")
     assert path.endswith(".mp3")
+
+
+def test_unknown_source_backend_fails_fast():
+    import pytest
+
+    with pytest.raises(ConfigError, match="未知音源后端"):
+        Facade.from_config(Settings(source_backend="typo"))
+
+
+def test_settings_rejects_non_positive_concurrency():
+    import pytest
+
+    with pytest.raises(ConfigError, match="并发数"):
+        Settings(max_concurrency=0)

@@ -191,7 +191,7 @@ class DownloadAlbumUseCase:
     """
 
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
-                 concurrency: int = 4, retry: RetryPolicy | None = None,
+                 concurrency: int = 1, retry: RetryPolicy | None = None,
                  store: TaskStore | None = None,
                  stop_event: asyncio.Event | None = None,
                  cancel_event: threading.Event | None = None):

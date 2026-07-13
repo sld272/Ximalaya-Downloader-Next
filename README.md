@@ -10,61 +10,121 @@
 
 </div>
 
-喜马拉雅没有官方下载功能。本工具可把你**有权访问的**内容（免费、已购、会员可听）下载到本地，支持单曲与整张专辑、断点续传、失败重试与优雅停止。
+下载你有权访问的喜马拉雅内容，支持单曲、专辑、断点续传、失败重试与任务恢复。
 
-> 项目背景、特性与开发路线图见 [`docs/overview.md`](./docs/overview.md)；架构与设计原则见 [`docs/architecture.md`](./docs/architecture.md)。
+当前默认链路使用纯 Python 在本地生成 `xm-sign`，再通过 HTTP 请求播放信息。Google Chrome 用于交互登录，以及 Cookie 缓存失效时从专用 Profile 读取已持久化会话，不负责默认下载请求。
 
-## 安装
+> `xm-sign` 只满足特定接口的签名要求，不能替代登录、内容授权，也不保证服务端一定接受请求。请只下载你有权访问的内容。
 
-前置：**Python 3.10+**，并在本机安装 **Google Chrome**（登录与解析都通过接管真实 Chrome 完成）。
+## 快速开始
+
+要求：Python 3.10+、Google Chrome。
 
 ```bash
-pip install -e .          # 核心库 + CLI
-pip install -e '.[tui]'   # 额外装终端面板（TUI）依赖
+pip install -e .
 ```
 
-## 登录
-
-首次使用先登录（下载会员/已购内容必须）：
+首次使用先登录：
 
 ```bash
 xdl login
 ```
 
-会打开一个**专用的 Chrome** 让你完成登录（扫码或账号密码）。登录态持久化在 `~/.xdl/chrome-profile`，之后下载自动复用，无需重复登录。
+浏览器打开后完成登录，并按终端提示确认。程序会验证登录态确实已写入专用 Profile，然后自动导出下载所需的 Cookie；成功后无需再执行刷新命令。
 
-> 免费的**专辑曲目清单**走公开接口，无需登录即可获取；但逐集下载音频仍需登录（匿名请求会被风控拦截）。
-
-## 命令行
+随后直接下载：
 
 ```bash
-xdl track <链接或ID>                     # 下载单个音频
-xdl album <链接或ID>                     # 下载整张专辑
-xdl album <链接或ID> --range 1-20        # 只下第 1–20 集（也支持 5- / -10 / 7）
-xdl album <链接或ID> --quality high      # 指定音质：high / standard（默认）/ low
-xdl resume                              # 继续上次未完成的下载
-xdl risk-report                         # 汇总本地风控观测（不发网络请求）
-xdl inspect                             # 诊断：列出 Profile 的设备标识存储 key（不读 value）
+xdl track <音频链接或 trackId>
+xdl album <专辑链接或 albumId>
 ```
 
-- **音质**：`--quality` 在可用音质间选择，缺失时自动回退。
-- **断点续传**：已存在的文件自动跳过；未下完的 `.part` 会从断点续传。
-- **优雅停止**：下载中按 `Ctrl-C` 会存好进度再退出，`xdl resume` 可继续。
-- **下载目录**：默认 `./downloads`，可用全局参数 `--download-dir <目录>` 覆盖。
-- 任务状态持久化在 `~/.xdl/tasks.db`。
-- 受保护接口的最小化观测记录在 `~/.xdl/risk-events.jsonl`；不包含 Cookie、设备指纹或播放 URL。
-
-## 终端面板（TUI）
+## 常用命令
 
 ```bash
+xdl login                              # 首次登录或重新登录
+xdl track <链接或ID>                    # 下载单个音频
+xdl album <链接或ID>                    # 下载整张专辑
+xdl album <链接或ID> --range 1-20       # 只下载指定区间
+xdl album <链接或ID> --quality high     # high / standard / low
+xdl --concurrency 3 album <链接或ID>     # 自定义异步并发数（默认 1）
+xdl resume                             # 恢复未完成任务
+xdl gen-sign                           # 检查本地签名链路
+xdl risk-report                        # 汇总本地风控记录，不发网络请求
+```
+
+全局选项必须写在子命令之前：
+
+```bash
+xdl --download-dir D:\Audio album <链接或ID>
+xdl --concurrency 3 resume
+```
+
+默认下载目录为当前目录下的 `downloads`。
+
+### 下载行为
+
+- 音质缺失时会自动回退到可用规格。
+- 已存在的完整文件会跳过。
+- 未完成的 `.part` 文件支持 HTTP Range 续传。
+- 下载中按 `Ctrl-C` 会保存进度并优雅退出，之后运行 `xdl resume`。
+- 专辑下载和恢复默认使用 `1` 个异步 worker；可用全局参数 `--concurrency N` 调整。
+- 提高并发会同时增加播放信息请求和媒体下载数量，可能更容易触发平台风控；遇到已识别的风控信号仍会停止整批。
+
+## 默认 HTTP 后端
+
+默认的 `http` 后端按下面的顺序工作：
+
+1. 从本地 Cookie 缓存读取已验证的登录态；缓存过期时才从专用 Chrome Profile 重新导出。
+2. `PySignProvider` 读取内置设备信息模板或用户配置，并向设备上报服务取得本次 `cadd` 与 `sid`。
+3. 组合 `xm-sign`、Cookie 和必要请求头，调用 `baseInfo`。
+4. 解码播放地址并交给下载任务引擎落盘。
+
+可用以下命令只检查签名生成，不访问受保护的播放信息接口：
+
+```bash
+xdl gen-sign
+xdl gen-sign -n 3
+```
+
+该命令仍会访问设备上报服务，因此不是完全离线操作。
+
+### Chrome 兼容后端
+
+旧的 Chrome/CDP 音源仍作为兼容路径保留，但不推荐日常使用：
+
+```bash
+xdl --source-backend chrome track <链接或ID>
+```
+
+历史实测表明 CDP 环境可能更容易触发验证码或 `1001` / `3005` 风控。只有在默认 HTTP 后端暂时不兼容且你理解这一限制时才使用它。
+
+## 终端面板
+
+安装可选依赖：
+
+```bash
+pip install -e '.[tui]'
 xdl-tui
 ```
 
-一个交互式面板：顶部填链接/ID、选音质与区间，按钮触发下载 / 恢复 / 停止 / 登录；中间是**实时任务表**（每集状态与进度，轮询任务库刷新），底部是日志。适合盯着一批下载的进度。
+终端面板提供链接输入、音质与区间选择、下载/恢复/停止/登录按钮，以及从任务库刷新的逐集状态表。它与 CLI 使用同一个默认 HTTP 后端。
 
-## 作为 Python 库
+## 本地数据
 
-核心能力沉淀在可复用的库里，CLI/TUI 只是其上的薄壳。公开入口是 `Facade`（**同步**方法，内部自行驱动异步）：
+默认用户数据位于 `~/.xdl`：
+
+| 路径 | 用途 |
+|---|---|
+| `chrome-profile/` | 专用 Chrome 登录会话 |
+| `cookies.json` | HTTP 后端使用的登录 Cookie 缓存，属于敏感数据 |
+| `device-info.json` | 可选设备信息；不存在时使用包内模板 |
+| `tasks.db` | 下载任务、进度和恢复状态 |
+| `risk-events.jsonl` | 最小化风控观测，不含 Cookie 或播放 URL |
+
+可通过环境变量 `XDL_HOME` 修改用户数据根目录。
+
+## Python API
 
 ```python
 from xdl import Facade
@@ -75,20 +135,25 @@ app.download_album("<链接或ID>", quality="standard", range_="1-20")
 app.resume()
 ```
 
-## 关于风控（务必读）
+`Facade` 提供同步接口，内部负责异步音源与任务生命周期。
 
-喜马拉雅对**逐集播放信息接口**（`baseInfo`）做了自动化环境风控。本工具当前用 Playwright 通过 CDP 接管真实 Chrome 来获取播放地址，**实测每次会话通常只能下载约 3 集就会被服务端判定为自动化环境并返回 `系统繁忙`，本工具会立即熔断整批、不会持续重试**。在此过程中：
+## 开发与验证
 
-- 你**自己的日常浏览器**用同一账号快速连续播放不会触发风控——这是已知现象，根因在于 CDP 接管本身留下的 inspector 痕迹，无法在 Playwright/CDP 框架内消除。
-- 工具会在每次会话启动/登录后**自动重置设备指纹 Cookie 与 localStorage / sessionStorage / IndexedDB**（保留登录态），但这只能换来短暂的"新设备"蜜月，不解决"3 集后又被识别"。用 `xdl inspect` 可看到这些设备标识存储的 key 名（不读 value），用 `xdl risk-report` 可查看历次熔断与恢复时序。
-- 下一步治本方向是改用**浏览器扩展 + 本地原生消息**：让 `du_web_sdk` 跑在你日常真实浏览器里，XDL 只被动接收播放地址。
+```bash
+pip install -e '.[dev,tui]'
+python -m pytest -q
+python -m compileall -q src tests
+```
 
-完整的观测记录与差分证据见 [`docs/risk-control-observations.md`](./docs/risk-control-observations.md)。
+测试默认使用替身，不会访问真实登录态、设备上报服务或播放信息接口。离线测试通过不等于真实平台验收通过。
 
-## 免责声明
+更多文档：
 
-本工具仅供个人学习研究。请遵守喜马拉雅的服务条款与相关法律法规，尊重内容创作者的版权，请勿用于侵犯版权或任何商业用途。使用本工具产生的一切后果由使用者自行承担。
+- [项目现状与范围](./docs/overview.md)
+- [架构设计](./docs/architecture.md)
 
-## 许可证
+## 免责声明与许可证
 
-[AGPL-3.0](./LICENSE)
+本项目仅供学习研究。请遵守平台服务条款和相关法律法规，尊重内容创作者版权，勿用于侵权或商业用途。使用本工具产生的后果由使用者自行承担。
+
+[AGPL-3.0-or-later](./LICENSE)
