@@ -28,7 +28,7 @@ class _Decoder:
 
 
 def _patch_login_playwright(monkeypatch, cookies, pages=()):
-    """替换同步 Playwright，返回可检查是否被关闭的最小 CDP browser。"""
+    """替换同步 Playwright，返回可检查根 CDP 关闭请求的最小 browser。"""
     import playwright.sync_api as sync_api
 
     class _Context:
@@ -42,9 +42,19 @@ def _patch_login_playwright(monkeypatch, cookies, pages=()):
         def __init__(self):
             self.contexts = [_Context()]
             self.closed = False
+            self.root_cdp_commands = []
 
         def close(self):
             self.closed = True
+
+        def new_browser_cdp_session(self):
+            browser = self
+
+            class _RootSession:
+                def send(self, method):
+                    browser.root_cdp_commands.append(method)
+
+            return _RootSession()
 
     browser = _Browser()
 
@@ -491,7 +501,8 @@ def test_login_verification_never_resets_profile_state(monkeypatch):
                         lambda _context: reset_calls.append(True))
 
     assert source._verify_interactive_login() is True
-    assert browser.closed is True
+    assert browser.root_cdp_commands == ["Browser.close"]
+    assert browser.closed is False
     assert reset_calls == []
 
 

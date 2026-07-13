@@ -723,7 +723,11 @@ class ChromeSource:
             context = contexts[0]
             authenticated = _has_login_cookie(context.cookies(platform.BASE))
             if authenticated:
-                browser.close()
+                # connect_over_cdp() 取得的是远程 Chrome 连接；browser.close()
+                # 只会关闭 Playwright 连接，不能让由 interactive_login 启动的
+                # Chrome 进程退出。通过根 CDP 会话发送 Browser.close，才会走
+                # Chrome 自身的正常退出/落盘流程。
+                browser.new_browser_cdp_session().send("Browser.close")
             return authenticated
 
     @staticmethod
