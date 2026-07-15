@@ -98,7 +98,7 @@ def _cmd_album(app: Facade, args) -> int:
     if result.stopped:
         print("\n已优雅停止，`xdl resume` 可继续。", file=sys.stderr)
         return 130
-    return 1 if result.failed else 0
+    return 1 if result.failed or getattr(result, "risk_control", None) else 0
 
 
 def _cmd_resume(app: Facade, args) -> int:
@@ -109,7 +109,8 @@ def _cmd_resume(app: Facade, args) -> int:
     stopped = False
     for result in results:
         _print_album_result(result)
-        failed = failed or bool(result.failed)
+        failed = (failed or bool(result.failed)
+                  or bool(getattr(result, "risk_control", None)))
         stopped = stopped or result.stopped
     if stopped:
         print("\n已优雅停止，`xdl resume` 可继续。", file=sys.stderr)

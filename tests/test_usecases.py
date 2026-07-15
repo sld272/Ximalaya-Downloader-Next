@@ -10,7 +10,8 @@ from xdl.adapters import SqliteTaskStore
 from xdl.domain import Album, AlbumTrack, DownloadTask, Track, PlayUrl, Quality
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       ResumeUseCase, RetryPolicy)
-from xdl.errors import NetworkError, AuthError, ApiError, CancelledByUser
+from xdl.errors import (NetworkError, AuthError, ApiError, CancelledByUser,
+                        RiskControlError)
 
 # 退避/冷却全置 0，测试不真正 sleep
 FAST = RetryPolicy(max_attempts=3, backoff_base=0, cooldown=0, global_rounds=2)
@@ -337,6 +338,38 @@ def test_resume_usecase_runs_pending_and_stale_tasks(tmp_path):
         assert not results[0].failed
         assert store.pending_tasks("123") == []
         assert [r["state"] for r in _db_rows(db)] == ["done", "done"]
+    finally:
+        store.close()
+
+
+def test_resume_risk_control_stops_later_quality_groups(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        store.save_album_meta("123", "专辑", 2)
+        store.save_album_meta("456", "另一专辑", 1)
+        store.upsert_pending([
+            DownloadTask("1", "123", "第1集", Quality.STANDARD.value, 1),
+            DownloadTask("2", "123", "第2集", Quality.HIGH.value, 2),
+            DownloadTask("3", "456", "第1集", Quality.STANDARD.value, 1),
+        ])
+
+        src = FakeSource(behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005)],
+        })
+        uc = ResumeUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                           store, concurrency=1, retry=FAST)
+
+        results = run(uc.execute())
+
+        assert len(results) == 1
+        assert results[0].failed == []
+        assert results[0].risk_control == "系统繁忙"
+        assert results[0].deferred == 3
+        assert src.calls == {"1": 1}
+        assert [row["state"] for row in _db_rows(db)] == [
+            "failed", "pending", "pending",
+        ]
     finally:
         store.close()
 

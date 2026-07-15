@@ -89,6 +89,38 @@ def test_resume_stop_prints_each_summary_before_130(capsys):
     assert "已优雅停止" in captured.err
 
 
+def test_album_batch_risk_returns_failure_and_prints_one_notice(capsys):
+    result = AlbumResult(
+        "专辑", risk_control="系统繁忙", deferred=3,
+    )
+
+    code = _cmd_album(
+        FakeApp(album_result=result),
+        SimpleNamespace(target="123", quality=None, range=None),
+    )
+
+    output = capsys.readouterr().out
+    risk_lines = [
+        line for line in output.splitlines()
+        if "风控" in line or "系统繁忙" in line
+    ]
+    assert code == 1
+    assert len(risk_lines) == 1
+
+
+def test_resume_batch_risk_returns_failure(capsys):
+    result = AlbumResult(
+        "专辑", risk_control="系统繁忙", deferred=3,
+    )
+
+    code = _cmd_resume(
+        FakeApp(resume_results=[result]), SimpleNamespace(),
+    )
+
+    assert code == 1
+    assert capsys.readouterr().out.count("系统繁忙") == 1
+
+
 def test_risk_report_is_local_only(tmp_path, capsys):
     path = tmp_path / "events.jsonl"
     path.write_text(

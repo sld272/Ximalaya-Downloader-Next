@@ -168,10 +168,15 @@ class AlbumResult:
     failed: list[tuple[AlbumTrack, str]] = field(default_factory=list)
     incomplete: bool = False
     stopped: bool = False
+    risk_control: str | None = None
+    deferred: int = 0
 
     def summary(self) -> str:
         line = (f"专辑《{self.album_title}》：下载 {len(self.downloaded)}，"
                 f"跳过 {len(self.skipped)}，失败 {len(self.failed)}。")
+        if self.risk_control:
+            line += (f"（平台风控已熔断，{self.deferred} 项待恢复："
+                     f"{self.risk_control}）")
         if self.incomplete:
             line += "（注意：曲目清单未取全，登录后重跑可补齐）"
         return line
@@ -243,7 +248,7 @@ class DownloadAlbumUseCase:
 
         failures = await self._run_work_items(work, quality, album_dir, width,
                                               total, reporter, result)
-        result.failed = [(item.track, str(e)) for item, e in failures]
+        self._apply_failures(result, failures)
         return result
 
     async def resume_tasks(self, album_id: str, album_title: str,
@@ -273,7 +278,7 @@ class DownloadAlbumUseCase:
 
         failures = await self._run_work_items(work, quality, album_dir, width,
                                               total, reporter, result)
-        result.failed = [(item.track, str(e)) for item, e in failures]
+        self._apply_failures(result, failures)
         return result
 
     # ---- 内部 ----
@@ -309,7 +314,6 @@ class DownloadAlbumUseCase:
         # 风控不是普通的逐项失败：首个信号出现后整批熔断，禁止失败收尾轮
         # 自动重新冲击受保护接口。任务保持 retryable，可在冷却/人工确认后 resume。
         if any(isinstance(error, RiskControlError) for _item, error in failures):
-            _note(reporter, "检测到平台风控，已熔断本批次；不会自动继续重试。")
             return failures
 
         # 失败收尾轮：跨轮间隔后统一重试「可重试」的残余失败项。
@@ -373,11 +377,30 @@ class DownloadAlbumUseCase:
                         await self._store_call(reporter, self._store.mark_failed,
                                                item.task.id, e.category, str(e),
                                                e.retryable)
-                    _note(reporter, f"  ✗ {label} — {e}")
+                    if not isinstance(e, RiskControlError):
+                        _note(reporter, f"  ✗ {label} — {e}")
                     failures.append((item, e))
 
         await asyncio.gather(*(worker(item) for item in work))
         return failures
+
+    @staticmethod
+    def _apply_failures(
+        result: AlbumResult,
+        failures: list[tuple[_AlbumWorkItem, XdlError]],
+    ) -> None:
+        """把逐项错误收敛成用户结果；同一批次的风控只保留一个原因。"""
+        risk_failures = [
+            (item, error) for item, error in failures
+            if isinstance(error, RiskControlError)
+        ]
+        result.failed = [
+            (item.track, str(error)) for item, error in failures
+            if not isinstance(error, RiskControlError)
+        ]
+        if risk_failures:
+            result.risk_control = str(risk_failures[0][1])
+            result.deferred = len(risk_failures)
 
     async def _requeue_items(self, items: list[_AlbumWorkItem], reporter) -> None:
         if self._store is None:
@@ -493,7 +516,7 @@ class ResumeUseCase:
         results: list[AlbumResult] = []
         await self._source.open()
         try:
-            for album_id, title, _count in albums:
+            for album_index, (album_id, title, _count) in enumerate(albums):
                 tasks = await self._store_call(reporter, self._store.pending_tasks,
                                                album_id, default=[])
                 if not tasks:
@@ -501,7 +524,8 @@ class ResumeUseCase:
                 total = await self._store_call(reporter, self._store.album_total,
                                                album_id, default=0)
                 merged = AlbumResult(title)
-                for quality_value, group in self._by_quality(tasks).items():
+                quality_groups = list(self._by_quality(tasks).items())
+                for group_index, (quality_value, group) in enumerate(quality_groups):
                     try:
                         quality = Quality(quality_value)
                     except ValueError:
@@ -523,7 +547,19 @@ class ResumeUseCase:
                     merged.downloaded.extend(partial.downloaded)
                     merged.skipped.extend(partial.skipped)
                     merged.failed.extend(partial.failed)
+                    if partial.risk_control:
+                        merged.risk_control = partial.risk_control
+                        merged.deferred += partial.deferred
+                        merged.deferred += sum(
+                            len(rest) for _, rest in quality_groups[group_index + 1:]
+                        )
+                        break
                 results.append(merged)
+                if merged.risk_control:
+                    merged.deferred += sum(
+                        count for _, _, count in albums[album_index + 1:]
+                    )
+                    break
         finally:
             await self._source.close()
         return results

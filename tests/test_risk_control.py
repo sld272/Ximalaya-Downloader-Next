@@ -13,6 +13,7 @@ from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase
                                       RetryPolicy)
 from xdl.domain import Album, AlbumTrack, Quality
 from xdl.errors import ApiError, AuthError, RiskControlError
+from xdl.frontends.cli import _print_album_result
 from xdl.risk import RiskEventRecorder, summarize_risk_events
 from xdl.settings import Settings
 
@@ -615,6 +616,20 @@ class _Sink:
         self.writes.append((args, kwargs))
 
 
+class _PrintingReporter:
+    def start(self, _title, _total):
+        pass
+
+    def update(self, _done, _total):
+        pass
+
+    def finish(self, _path):
+        pass
+
+    def note(self, message):
+        print(message)
+
+
 def test_first_risk_control_opens_batch_circuit_breaker(tmp_path):
     source = _RiskSource()
     sink = _Sink()
@@ -627,9 +642,29 @@ def test_first_risk_control_opens_batch_circuit_breaker(tmp_path):
 
     assert source.calls == ["1"]
     assert sink.writes == []
-    assert len(result.failed) == 3
-    assert all("风控熔断" in message or "系统繁忙" in message
-               for _track, message in result.failed)
+    assert result.failed == []
+    assert result.deferred == 3
+    assert "系统繁忙" in result.risk_control
+
+
+def test_batch_risk_control_is_displayed_only_once(tmp_path, capsys):
+    source = _RiskSource()
+    usecase = DownloadAlbumUseCase(
+        source, _Sink(), str(tmp_path), concurrency=1,
+        retry=RetryPolicy(max_attempts=1, cooldown=0, global_rounds=2),
+    )
+
+    result = run(usecase.execute(
+        "123", Quality.STANDARD, reporter=_PrintingReporter(),
+    ))
+    _print_album_result(result)
+
+    output = capsys.readouterr().out
+    risk_lines = [
+        line for line in output.splitlines()
+        if "风控" in line or "系统繁忙" in line
+    ]
+    assert len(risk_lines) == 1
 
 
 def test_single_track_risk_control_is_not_immediately_retried(tmp_path):
