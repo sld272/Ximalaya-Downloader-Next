@@ -69,6 +69,15 @@ class Facade:
         store = self._task_store()
         return store.all_tasks() if store is not None else []
 
+    def list_formats(self, target: str) -> dict:
+        """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
+
+        返回 {'title': str, 'track_id': str, 'formats': [{type, file_size}],
+               'default_quality': str}
+        URL 不解密——本方法只用于展示格式清单，不发下载请求。
+        """
+        return asyncio.run(self._list_formats(target))
+
     def inspect_storage(self) -> dict:
         """诊断：列出当前 Profile 的设备标识存储 key 名（不读 value），
         验证"清 Cookie"覆盖面是否完整。只读、不下载、不重置设备指纹。"""
@@ -141,6 +150,25 @@ class Facade:
         finally:
             self._cancel_task(watcher)
             cleanup_signal()
+
+    async def _list_formats(self, target: str) -> dict:
+        from ..domain import parse_track_id
+        track_id = parse_track_id(target)
+        await self._source.open()
+        try:
+            track = await self._source.get_track(track_id)
+        finally:
+            await self._source.close()
+        formats = []
+        for p in track.play_urls:
+            if p.url:
+                formats.append({"type": p.type, "file_size": p.file_size})
+        return {
+            "title": track.title,
+            "track_id": track.track_id,
+            "formats": formats,
+            "default_quality": self._settings.default_quality,
+        }
 
     def _watch_external_cancel(self, cancel: threading.Event | None,
                                stop_event: asyncio.Event,
