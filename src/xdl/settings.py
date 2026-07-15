@@ -61,6 +61,17 @@ class Settings:
     # 授权，也不保证平台接受请求；认证与风险响应始终由调用方处理。
     source_impersonate: str = "chrome146"
 
+    # ---- 风控后刷新设备指纹（实验，默认关闭）----
+    # 命中已识别风控后，用真实浏览器重生 device_info 并重试当前曲。
+    # 不保证服务端接受，也不是默认抗风控策略。
+    experiment_rotate_device_on_risk: bool = False
+    experiment_browser_clear_state: bool = True
+    experiment_browser_fresh_profile: bool = False
+    experiment_persist_device_info: bool = True
+    experiment_strip_device_cookies: bool = True
+    # 0 = 不限次数（换身后首次成功才允许再换；首次仍风控则本会话停用）
+    experiment_max_device_rotations: int = 0
+
     def __post_init__(self):
         if self.max_concurrency < 1:
             raise ConfigError("异步并发数必须是大于 0 的整数。")

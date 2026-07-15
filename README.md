@@ -91,6 +91,33 @@ xdl gen-sign -n 3
 
 该命令仍会访问设备上报服务，因此不是完全离线操作。
 
+### 设备指纹刷新（实验功能）
+
+默认关闭。开启后，在识别到风控时会尝试用浏览器刷新设备指纹并重试当前曲目：
+
+```bash
+# 全局选项写在子命令前
+xdl --experiment-rotate-device album <链接或ID>
+xdl --experiment-rotate-device --concurrency 1 album <ID> --range 1-8
+
+# 手动提取 / 刷新指纹
+xdl extract-device --refresh
+xdl extract-device --fresh-profile -o %USERPROFILE%\.xdl\device-info-fresh.json
+xdl gen-sign --device-info %USERPROFILE%\.xdl\device-info.json
+```
+
+| 写法 | 说明 |
+|---|---|
+| `--experiment-rotate-device` | 全局开关；写在子命令前，命中风控后刷新指纹并重试当前曲 |
+| `extract-device --refresh` | 清设备 Cookie/storage 后，让 `du_web_sdk` 重生并采集 |
+| `extract-device --fresh-profile` | 用临时全新 Profile 采集（通常无登录态） |
+| `extract-device -o <路径>` | 指定指纹输出路径（默认 `~/.xdl/device-info.json`） |
+| `gen-sign --device-info <路径>` | 用指定指纹文件冒烟生成 `xm-sign` |
+
+换身后首次请求成功，本会话后续再遇风控仍可刷新；若换身后首次仍风控，本会话停用。更细的行为（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置，例如 `experiment_max_device_rotations=0` 表示不限次数。
+
+该能力**不保证**恢复可用，也不构成对平台访问控制的绕过。
+
 ### Chrome 兼容后端
 
 旧的 Chrome/CDP 音源仍作为兼容路径保留，但不推荐日常使用：

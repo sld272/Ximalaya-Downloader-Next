@@ -149,6 +149,7 @@ def _cmd_inspect(app: Facade, args) -> int:
 def _cmd_gen_sign(app: Facade, args) -> int:
     """纯算 xm-sign 冒烟：调用 PySignProvider 生成 xm-sign 并打印。"""
     from ..adapters import PySignProvider
+
     signer = PySignProvider(device_info_path=args.device_info)
     signer.open()
     try:
@@ -162,16 +163,26 @@ def _cmd_gen_sign(app: Facade, args) -> int:
 
 def _cmd_extract_device(app: Facade, args) -> int:
     """从 Chrome Profile 提取 du_web_sdk 设备指纹到 JSON 文件。"""
-    from ..adapters.sign import extract_device_info, save_device_info
-
-    info = extract_device_info(
-        profile_dir=args.profile or Settings().chrome_profile_dir,
-        chrome_path=Settings().chrome_path,
-        headless=not args.no_headless,
+    from ..adapters.sign import (
+        identity_fingerprint,
+        refresh_device_identity_via_browser,
+        save_device_info,
+        summarize_extract,
     )
-    out = args.output or Settings().device_info_path
-    save_device_info(info, out)
-    print(f"已保存 {len(info)} 个字段到 {out}")
+
+    settings = Settings()
+    result = refresh_device_identity_via_browser(
+        profile_dir=args.profile or settings.chrome_profile_dir,
+        chrome_path=settings.chrome_path,
+        headless=not args.no_headless,
+        clear_device_state=bool(getattr(args, "refresh", False)),
+        fresh_profile=bool(getattr(args, "fresh_profile", False)),
+    )
+    out = args.output or settings.device_info_path
+    save_device_info(result.device_info, out)
+    print(f"已保存 {len(result.device_info)} 个字段到 {out}")
+    print(f"identity={identity_fingerprint(result.device_info)}")
+    print(summarize_extract(result))
     return 0
 
 
@@ -212,6 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrency", type=_positive_int, metavar="N",
         help="专辑下载/恢复的异步并发数（默认 1；提高可能触发平台风控）",
     )
+    parser.add_argument(
+        "--experiment-rotate-device",
+        action="store_true",
+        help="[实验] 命中风控后用浏览器刷新设备指纹并重试（默认关闭；不保证有效）",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True,
         metavar="{login,track,album,resume,gen-sign,risk-report}",
@@ -250,6 +266,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument("--profile", help="Chrome 用户目录（默认 ~/.xdl/chrome-profile）")
     p_extract.add_argument("--no-headless", action="store_true",
                            help="显示浏览器窗口（调试可见 SDK 加载过程）")
+    p_extract.add_argument(
+        "--refresh", action="store_true",
+        help="先清设备 Cookie/storage，再让 du_web_sdk 重生后采集（真换指纹）",
+    )
+    p_extract.add_argument(
+        "--fresh-profile", action="store_true",
+        help="使用全新临时 Profile 采集（完全新设备；通常无登录态）",
+    )
 
     p_cookies = sub.add_parser("refresh-cookies")
     p_cookies.add_argument("--no-headless", action="store_true",
@@ -269,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         settings.source_backend = args.source_backend
     if args.concurrency is not None:
         settings.max_concurrency = args.concurrency
+    if getattr(args, "experiment_rotate_device", False):
+        settings.experiment_rotate_device_on_risk = True
     handlers = {
         "login": _cmd_login,
         "track": _cmd_track,

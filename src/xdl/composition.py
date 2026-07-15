@@ -60,6 +60,13 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             risk_recorder=risk_recorder,
             chrome_fallback=chrome_fallback,
             impersonate=settings.source_impersonate,
+            experiment_rotate_device_on_risk=settings.experiment_rotate_device_on_risk,
+            experiment_browser_clear_state=settings.experiment_browser_clear_state,
+            experiment_browser_fresh_profile=settings.experiment_browser_fresh_profile,
+            experiment_persist_device_info=settings.experiment_persist_device_info,
+            experiment_strip_device_cookies=settings.experiment_strip_device_cookies,
+            experiment_max_rotations=settings.experiment_max_device_rotations,
+            device_info_path=settings.device_info_path,
         )
     if backend == "chrome":
         # 兼容路径：CDP 接管真实 Chrome。实测仍可能触发自动化环境风控，

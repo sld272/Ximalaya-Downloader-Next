@@ -86,6 +86,8 @@ device_info
 
 专辑曲目清单由 `_album_list.py` 调用公开的 `/revision/album/getTracksList`，不需要 `xm-sign`。
 
+可选实验功能：`Settings.experiment_rotate_device_on_risk` 开启时，`HttpSource` 在已识别风控后通过浏览器清设备态、采集新的 `device_info`、`SignProvider.reload`，并重试当前曲。换身后首次成功才允许本会话再次换身；换身后首次仍风控则停用。默认关闭，不保证服务端接受。
+
 ### 3.4 Chrome 兼容音源
 
 `--source-backend chrome` 选择 `ChromeSource`。它启动 Chrome 后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。
@@ -133,7 +135,7 @@ device_info
 
 `config.paths.xdl_home()` 是用户数据目录的单一来源，默认 `~/.xdl`，可由 `XDL_HOME` 覆盖。`Settings` 使用它生成 Profile、Cookie、任务库、设备信息和风控日志路径。
 
-命令行当前覆盖下载目录、音源后端和异步并发数。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。其他调优项通过 Python `Settings` 使用。
+命令行当前可覆盖下载目录、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。设备指纹刷新的细项（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置。
 
 ## 8. 测试边界
 

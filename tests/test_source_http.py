@@ -27,6 +27,17 @@ class FakeSignProvider:
         self.closed = False
         self.open_count = 0
         self.close_count = 0
+        self.reload_count = 0
+        self._device = {
+            "HW5": "hw-original",
+            "GJ2": "gj-original",
+            "DP5": "dp-original",
+            "adi": "adi-original",
+            "acd": "acd-original",
+            "ew1": {"yV2": "Mozilla/5.0"},
+            "fd2": {},
+            "Zf5": 0,
+        }
 
     def open(self) -> None:
         self.opened = True
@@ -39,6 +50,14 @@ class FakeSignProvider:
     def sign(self) -> str:
         return self.value
 
+    def reload(self, device_info=None) -> None:
+        self.reload_count += 1
+        if device_info is not None:
+            self._device = dict(device_info)
+
+    def device_info(self) -> dict:
+        return dict(self._device)
+
 
 class FakeDecoder:
     """复刻 Www2Decoder 接口的最小替身（不解真音频，原样回传）。"""
@@ -49,7 +68,11 @@ class FakeDecoder:
 def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
                       base_info_body=None, cookies=None,
                       cached_cookies=None,
-                      chrome_path="/nonexist/chrome"):
+                      chrome_path="/nonexist/chrome",
+                      experiment_rotate_device_on_risk=False,
+                      experiment_strip_device_cookies=True,
+                      experiment_max_rotations=0,
+                      response_bodies=None):
     """构造一个已经 ready 的 HttpSource（cookies 已加载、跳过浏览器提取）。"""
     cookies = cookies if cookies is not None else [
         {"name": "1&_token", "value": "tok", "domain": ".ximalaya.com",
@@ -78,11 +101,18 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         chrome_headless=True,
         risk_recorder=None,
         impersonate="",  # 测试不需要 curl-cffi；_http_get 被 monkeypatch 拦截
+        experiment_rotate_device_on_risk=experiment_rotate_device_on_risk,
+        experiment_strip_device_cookies=experiment_strip_device_cookies,
+        experiment_max_rotations=experiment_max_rotations,
+        experiment_persist_device_info=False,
+        device_info_path="/fake/device-info.json",
     )
 
     # 替换 requests.get（baseInfo 调用）返回我们给的 body
     responses = []
-    if base_info_body is not None:
+    if response_bodies is not None:
+        responses.extend(response_bodies)
+    elif base_info_body is not None:
         responses.append(base_info_body)
 
     class _FakeResp:
@@ -500,3 +530,182 @@ def test_interactive_login_without_fallback_raises_config_error():
     import pytest
     with pytest.raises(Exception):  # ConfigError
         src.interactive_login()
+
+
+def test_rotate_device_identity_reloads_from_browser(monkeypatch):
+    """换身走真实浏览器提取结果。"""
+    from xdl.adapters.sign.extractor import DeviceExtractResult
+
+    src = _make_http_source(
+        monkeypatch,
+        experiment_strip_device_cookies=True,
+    )
+    _run_async(src.open())
+    assert "_xmLog=dev" in src._cookie_header
+
+    extracted = {
+        "HW5": "hw-from-browser",
+        "GJ2": "gj-from-browser",
+        "DP5": "dp-from-browser",
+        "adi": "adi-browser",
+        "acd": "acd-browser",
+        "ew1": {"yV2": "Mozilla/5.0"},
+        "fd2": {"xz7": "uuid-browser"},
+        "Zf5": 1,
+    }
+    browser_cookies = [
+        {"name": "1&_token", "value": "tok", "domain": ".ximalaya.com", "path": "/"},
+        {"name": "_xmLog", "value": "new-dev", "domain": ".ximalaya.com", "path": "/"},
+        {"name": "other", "value": "1", "domain": ".ximalaya.com", "path": "/"},
+    ]
+
+    import xdl.adapters.source_http as mod
+    monkeypatch.setattr(
+        mod, "refresh_device_identity_via_browser",
+        lambda **_kw: DeviceExtractResult(
+            device_info=extracted,
+            cookies=browser_cookies,
+            cleared_cookie_names=["_xmLog", "wfp"],
+            storage_report={"localStorageCleared": 3, "sessionStorageCleared": 1,
+                            "indexedDB": ["treasure"]},
+        ),
+    )
+    monkeypatch.setattr(mod, "save_device_info", lambda *_a, **_k: None)
+
+    fp = _run_async(src.rotate_device_identity())
+
+    assert fp
+    assert src._sign.reload_count == 1
+    assert src._sign.device_info()["HW5"] == "hw-from-browser"
+    # strip 后浏览器导出的 _xmLog 不应进入 HTTP Cookie 头
+    assert "_xmLog" not in src._cookie_header
+    assert "1&_token=tok" in src._cookie_header
+    assert src._device_fingerprint_was_reset is True
+    assert src._device_rotations == 1
+
+
+def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b"):
+    from xdl.adapters.sign.extractor import DeviceExtractResult
+    import xdl.adapters.source_http as mod
+
+    monkeypatch.setattr(
+        mod, "refresh_device_identity_via_browser",
+        lambda **_kw: DeviceExtractResult(
+            device_info={
+                "HW5": hw, "GJ2": "gj-b", "DP5": "dp-b", "adi": "a",
+                "acd": "c", "ew1": {"yV2": "ua"}, "fd2": {"xz7": "u"}, "Zf5": 1,
+            },
+            cookies=[{"name": "1&_token", "value": "tok",
+                      "domain": ".ximalaya.com", "path": "/"}],
+            cleared_cookie_names=["_xmLog"],
+        ),
+    )
+    monkeypatch.setattr(mod, "save_device_info", lambda *_a, **_k: None)
+
+
+def test_risk_control_rotates_then_retries(monkeypatch):
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "恢复曲",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, ok],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+    track = _run_async(src.get_track("852566950"))
+    assert track.title == "恢复曲"
+    assert src._sign.reload_count == 1
+    assert src._device_rotations == 1
+    assert src._rotate_awaiting_success is False
+    assert src._rotate_disabled is False
+
+
+def test_risk_control_without_experiment_does_not_rotate(monkeypatch):
+    body = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    src = _make_http_source(monkeypatch, base_info_body=body)
+    _run_async(src.open())
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("852566950"))
+    assert src._sign.reload_count == 0
+    assert src._device_rotations == 0
+
+
+def test_rotate_after_success_allows_another_rotation(monkeypatch):
+    """换身后成功过，再遇风控仍可换身。"""
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    # 曲1: risk→rotate→ok；曲2: risk→rotate→ok
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, ok, risk, ok],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+    assert _run_async(src.get_track("1")).title == "ok"
+    assert src._device_rotations == 1
+    assert _run_async(src.get_track("2")).title == "ok"
+    assert src._device_rotations == 2
+    assert src._rotate_disabled is False
+
+
+def test_immediate_risk_after_rotate_disables_further_rotation(monkeypatch):
+    """换身后首次请求仍风控 → 本会话不再换身。"""
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    # 曲1: risk → rotate → risk(探针失败停用)；曲2: risk（不再 rotate）
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, risk, risk],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("1"))
+    assert src._device_rotations == 1
+    assert src._rotate_disabled is True
+    # 下一曲也不应再换身
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("2"))
+    assert src._device_rotations == 1
+    assert src._sign.reload_count == 1
+
+
+def test_experiment_max_rotations_hard_cap(monkeypatch):
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    # 即便换身后成功，硬上限 1 也会阻止第二次换身
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, ok, risk],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=1,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+    assert _run_async(src.get_track("1")).title == "ok"
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("2"))
+    assert src._device_rotations == 1

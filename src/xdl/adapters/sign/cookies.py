@@ -22,6 +22,20 @@ from ...config import platform
 
 _LOGIN_COOKIE_SUFFIX = "&_token"
 
+# 与 ChromeSource 一致：设备标识 Cookie 前缀。剥离它们可在 HTTP 实验中
+# 尝试与新的 device_info 对齐（保留登录 token）。
+_DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
+
+
+def is_device_fingerprint_cookie(name) -> bool:
+    """判断 Cookie 名是否为设备/统计类指纹载体（不读 value）。"""
+    return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
+
+
+def strip_device_cookies(cookies: Iterable[dict]) -> list[dict]:
+    """保留登录等业务 Cookie，去掉设备指纹类 Cookie。"""
+    return [c for c in cookies if not is_device_fingerprint_cookie(c.get("name"))]
+
 
 def is_login_cookie(cookies: Iterable[dict]) -> bool:
     """只判断登录 token 是否存在；不读 value。"""

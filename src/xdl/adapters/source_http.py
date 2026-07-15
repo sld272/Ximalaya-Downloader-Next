@@ -29,7 +29,11 @@ from ..errors import (ApiError, AuthError, ConfigError, NetworkError,
 from ..ports import Decoder, SignProvider
 from ..risk import RiskEventRecorder
 from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
-                           load_cached_cookies, save_cookies, is_login_cookie)
+                           load_cached_cookies, save_cookies, is_login_cookie,
+                           strip_device_cookies)
+from .sign.extractor import (identity_fingerprint,
+                             refresh_device_identity_via_browser,
+                             save_device_info, summarize_extract)
 from ._album_list import fetch_album as _fetch_album_list
 
 # 与 ChromeSource 的风控判定保持一致：3005 是复用码，仅在 msg 含"系统繁忙"时
@@ -92,6 +96,13 @@ class HttpSource:
         cookie_max_age: int = 1800,
         chrome_fallback=None,
         impersonate: str = "chrome146",
+        experiment_rotate_device_on_risk: bool = False,
+        experiment_browser_clear_state: bool = True,
+        experiment_browser_fresh_profile: bool = False,
+        experiment_persist_device_info: bool = True,
+        experiment_strip_device_cookies: bool = True,
+        experiment_max_rotations: int = 0,
+        device_info_path: str = "",
     ):
         """初始化 HTTP 音源。
 
@@ -102,6 +113,9 @@ class HttpSource:
         播放地址"无关（登录只是把会话落到 Chrome Profile；inspect 只是列设备
         标识 key）。`xdl login` 走它把登录态写进 ~/.xdl/chrome-profile，
         登录成功后会自动从该 Profile 导出 Cookie 给 HttpSource 使用。
+
+        实验开关（默认关闭）：命中已识别风控时，通过真实浏览器重生设备指纹并
+        重试当前曲。不保证服务端接受，也不是默认抗风控策略。
         """
         self._decoder = decoder
         self._sign = sign_provider
@@ -114,6 +128,13 @@ class HttpSource:
         self._cookie_max_age = cookie_max_age
         self._chrome_fallback = chrome_fallback
         self._impersonate = impersonate
+        self._experiment_rotate = bool(experiment_rotate_device_on_risk)
+        self._experiment_browser_clear = bool(experiment_browser_clear_state)
+        self._experiment_fresh_profile = bool(experiment_browser_fresh_profile)
+        self._experiment_persist = bool(experiment_persist_device_info)
+        self._experiment_strip_cookies = bool(experiment_strip_device_cookies)
+        self._experiment_max_rotations = max(0, int(experiment_max_rotations))
+        self._device_info_path = device_info_path or ""
         if impersonate and not _HAS_CURL_CFFI:
             raise ConfigError(
                 "未安装 curl-cffi。请运行 `pip install curl-cffi` 后再使用 http 后端，"
@@ -127,6 +148,13 @@ class HttpSource:
         self._session_id = str(uuid.uuid4())
         self._request_index = 0
         self._in_flight = 0
+        self._device_rotations = 0
+        self._device_fingerprint_was_reset = False
+        # 换身策略：换身后首次请求成功 → 允许再次换身；
+        # 换身后首次请求仍是风控 → 本会话停用换身，避免无效连打。
+        self._rotate_awaiting_success = False
+        self._rotate_disabled = False
+        self._rotate_lock = asyncio.Lock()
 
     # ---- Source 端口：会话生命周期 ----
     async def open(self) -> None:
@@ -213,6 +241,25 @@ class HttpSource:
     async def get_track(self, track_id: str) -> Track:
         if not self._cookies:
             raise NetworkError("会话未打开，请先 await open()。")
+        # 风控换身：本曲最多换一次；换身后首次成功则本会话允许后续再换，
+        # 换身后首次仍风控则停用本会话换身。默认关闭时循环只跑一轮。
+        rotated_for_this_track = False
+        while True:
+            try:
+                track = await self._get_track_once(track_id)
+                if rotated_for_this_track:
+                    self._mark_post_rotate_success()
+                return track
+            except RiskControlError:
+                if rotated_for_this_track:
+                    self._disable_rotate_after_immediate_risk()
+                    raise
+                if not await self._maybe_rotate_after_risk():
+                    raise
+                rotated_for_this_track = True
+                # 换身成功：用新 device_info / Cookie 重试当前曲目。
+
+    async def _get_track_once(self, track_id: str) -> Track:
         started = time.perf_counter()
         started_at = datetime.now(timezone.utc).isoformat()
         self._request_index += 1
@@ -329,6 +376,136 @@ class HttpSource:
         finally:
             self._in_flight -= 1
 
+    def _mark_post_rotate_success(self) -> None:
+        """换身后的首次成功：证明新指纹可用，允许本会话后续再次换身。"""
+        if not self._rotate_awaiting_success:
+            return
+        self._rotate_awaiting_success = False
+        print(
+            f"[experiment] 换身后请求成功（累计换身 {self._device_rotations} 次），"
+            "后续再遇风控仍可换身"
+        )
+
+    def _disable_rotate_after_immediate_risk(self) -> None:
+        """换身后首次请求仍风控：本会话停用换身，避免无效连打。"""
+        self._rotate_awaiting_success = False
+        if self._rotate_disabled:
+            return
+        self._rotate_disabled = True
+        print("[experiment] 换身后首次请求仍触发风控，停止本会话继续换身")
+
+    async def _maybe_rotate_after_risk(self) -> bool:
+        """风控后是否执行实验性换身。成功返回 True 并允许重试当前曲。
+
+        策略：
+        - 换身后、尚未出现成功请求前，不再叠加换身（由 get_track 本地标记判定
+          首次探针失败并停用）；
+        - 换身后曾成功 → 允许再次换身；
+        - `experiment_max_rotations > 0` 时额外施加硬上限；`0` 表示不限次数。
+        """
+        async with self._rotate_lock:
+            if not self._experiment_rotate:
+                return False
+            if self._rotate_disabled:
+                return False
+            if self._rotate_awaiting_success:
+                # 上一次换身的探针尚未出结果，不叠加换身。
+                return False
+            if (self._experiment_max_rotations > 0
+                    and self._device_rotations >= self._experiment_max_rotations):
+                print(
+                    f"[experiment] 已达换身硬上限 "
+                    f"{self._experiment_max_rotations}，停止换身"
+                )
+                return False
+            try:
+                await self.rotate_device_identity()
+            except Exception as e:
+                print(f"[warn] 实验换身失败，保持熔断: {e}")
+                return False
+            self._rotate_awaiting_success = True
+            return True
+
+    async def rotate_device_identity(self) -> str:
+        """通过真实浏览器重生设备指纹，并可选更新 Cookie。
+
+        打开 Chrome，清设备 Cookie/storage，让 du_web_sdk 重生后再采集
+        device_info。需要 SignProvider 实现 `reload(device_info)`。
+        不保证服务端接受新身份。
+        """
+        reload_fn = getattr(self._sign, "reload", None)
+        if not callable(reload_fn):
+            raise ConfigError(
+                "当前 SignProvider 不支持 reload(device_info)，无法做指纹换身实验。"
+            )
+        if not self._experiment_fresh_profile and not self._profile_dir:
+            raise ConfigError(
+                "换身需要 chrome_profile_dir，或开启 experiment_browser_fresh_profile。"
+            )
+
+        result = await asyncio.to_thread(
+            refresh_device_identity_via_browser,
+            profile_dir=self._profile_dir,
+            chrome_path=self._chrome_path,
+            headless=self._chrome_headless,
+            clear_device_state=self._experiment_browser_clear,
+            fresh_profile=self._experiment_fresh_profile,
+        )
+        print(f"[experiment] 浏览器提取：{summarize_extract(result)}")
+        cookie_note = self._apply_rotated_cookies(result)
+
+        new_info = result.device_info
+        await asyncio.to_thread(reload_fn, new_info)
+        if self._experiment_persist and self._device_info_path:
+            try:
+                await asyncio.to_thread(save_device_info, new_info, self._device_info_path)
+            except OSError as e:
+                print(f"[warn] 新设备指纹写盘失败: {e}")
+
+        self._device_rotations += 1
+        self._device_fingerprint_was_reset = True
+        fp = identity_fingerprint(new_info)
+        limit = (str(self._experiment_max_rotations)
+                 if self._experiment_max_rotations > 0 else "∞")
+        print(
+            f"[experiment] 已换设备指纹 identity={fp} "
+            f"(第 {self._device_rotations}/{limit} 次；{cookie_note})"
+        )
+        return fp
+
+    def _apply_rotated_cookies(self, result) -> str:
+        """把浏览器导出的 Cookie 应用到当前 HTTP 会话，返回日志摘要。"""
+        cookie_note = "cookies=unchanged"
+        if result.cookies:
+            cookies = result.cookies
+            if self._experiment_strip_cookies:
+                cookies = strip_device_cookies(cookies)
+            if is_login_cookie(cookies) or not self._cookies:
+                self._cookies = cookies
+                self._cookie_header = build_cookie_header(cookies)
+                self._authenticated = is_login_cookie(cookies)
+                cookie_note = (
+                    f"cookies=browser_export login={self._authenticated} "
+                    f"cleared={','.join(result.cleared_cookie_names[:8]) or '-'}"
+                )
+                if is_login_cookie(cookies) and self._cookies_cache_path:
+                    try:
+                        save_cookies(cookies, self._cookies_cache_path)
+                    except OSError:
+                        pass
+            else:
+                if self._experiment_strip_cookies and self._cookies:
+                    self._cookies = strip_device_cookies(self._cookies)
+                    self._cookie_header = build_cookie_header(self._cookies)
+                    self._authenticated = is_login_cookie(self._cookies)
+                cookie_note = "cookies=kept_login_stripped_device(export_lost_token)"
+        elif self._experiment_strip_cookies and self._cookies:
+            self._cookies = strip_device_cookies(self._cookies)
+            self._cookie_header = build_cookie_header(self._cookies)
+            self._authenticated = is_login_cookie(self._cookies)
+            cookie_note = "cookies=stripped_device_only"
+        return cookie_note
+
     # ---- Source 端口：专辑清单（免签公开接口，纯 HTTP） ----
     async def get_album(self, album_id: str) -> Album:
         return await asyncio.to_thread(_fetch_album_list, str(album_id))
@@ -407,7 +584,7 @@ class HttpSource:
                 request_index=request_index,
                 started_at=started_at,
                 authenticated=self._authenticated,
-                device_fingerprint_reset=False,
+                device_fingerprint_reset=self._device_fingerprint_was_reset,
             )
         except OSError:
             # 观测失败不影响真实平台响应或阻断下载

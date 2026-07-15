@@ -162,3 +162,29 @@ def test_signprovider_protocol_runtime_checkable():
     from xdl.ports import SignProvider
     signer = PySignProvider()
     assert isinstance(signer, SignProvider)
+
+
+def test_pysignprovider_reload_uses_injected_device_info(monkeypatch):
+    captured = []
+
+    def fake_post(url, data=None, headers=None, timeout=None, verify=None):
+        # 解密上报 body 的 JSON，确认 reload 后的 HW5 已进入载荷
+        import zlib
+        from xdl.adapters.sign.py_sign import _aes_decrypt
+        plain = zlib.decompress(_aes_decrypt(data, sign_conf.KEY))
+        captured.append(json.loads(plain.decode("utf-8")))
+        return _fake_report_response("c", "s")
+
+    import xdl.adapters.sign.py_sign as mod
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    signer = PySignProvider(device_info_path="/nonexistent/use-template.json")
+    signer.open()
+    original = signer.device_info()
+    injected = dict(original)
+    injected["HW5"] = "hw-injected-for-reload"
+    signer.reload(injected)
+    signer.sign()
+
+    assert captured and captured[0]["HW5"] == "hw-injected-for-reload"
+    assert captured[0]["HW5"] != original["HW5"]

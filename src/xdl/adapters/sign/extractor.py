@@ -1,70 +1,104 @@
 # -*- coding: utf-8 -*-
-"""浏览器设备指纹提取器（供 `xdl extract-device` 使用）。
+"""浏览器设备指纹提取器（对齐 easy-sign 的 Playwright + du_web_sdk 思路）。
 
-打开用户已有的 XDL 专用 Chrome Profile（与 `xdl login` 共用），加载喜马拉雅首页，
-通过 `du_web_sdk._deviceInfoCollector` 拿到一份真实设备指纹；保存为 JSON 后
-`PySignProvider` 可反复使用，无需再开浏览器即能生成 xm-sign。
+默认从 XDL 专用 Chrome Profile 打开喜马拉雅首页，读取
+`du_web_sdk._deviceInfoCollector`。可选先清设备 Cookie / storage，让 SDK
+重新生成身份后再采集——这才是「真换指纹」，不是本地改几个 ID 字段。
 
-提取过程只读，不改写页面 JS、不模拟任何用户操作，亦不向受保护接口发请求。
-指纹与"该 Profile 在该机器上的浏览器环境"绑定；换 UA/IP/Chrome 大版本后可能
-需要重新提取。
+提取过程不向受保护播放接口发请求。换 UA/IP/Chrome 大版本后通常需要重新提取。
+参考：https://github.com/liuziheng20091106/easy-sign
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from typing import Optional
+import tempfile
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 from ...config import platform
+from .cookies import is_device_fingerprint_cookie, is_login_cookie
 
 
-# 在 du_web_sdk 加载完成后回读其内部设备信息收集器。尝试两种暴露形态：
-#  1) `_deviceInfoCollector` 直接挂在 du_web_sdk 上
-#  2) 通过 `_checkextensions._deviceInfoCollector`（实测 easy-sign 模板）
-# 兼容 du_web_sdk 不同版本的内部结构。
+# 在 du_web_sdk 加载完成后回读其内部设备信息收集器。兼容 easy-sign 实测过的
+# 两种暴露形态。
 _EXTRACT_JS = r"""
 () => {
   const s = window.du_web_sdk;
-  if (!s) return null;
+  if (!s) return { ok: false, reason: "no_du_web_sdk" };
   const collector = s._deviceInfoCollector
     || (s._checkextensions && s._checkextensions._deviceInfoCollector);
-  if (!collector) return null;
-  return JSON.parse(JSON.stringify(collector));
+  if (!collector) {
+    return {
+      ok: false,
+      reason: "no_collector",
+      keys: Object.keys(s).slice(0, 40),
+    };
+  }
+  return { ok: true, info: JSON.parse(JSON.stringify(collector)) };
+}
+"""
+
+# 清空 origin 下可能把新旧设备身份关联起来的 storage（与 ChromeSource 一致）。
+_CLEAR_STORAGE_JS = r"""
+async () => {
+  const result = {
+    localStorageCleared: 0,
+    sessionStorageCleared: 0,
+    indexedDB: [],
+    indexedDBError: null,
+  };
+  try {
+    result.localStorageCleared = localStorage.length;
+    localStorage.clear();
+  } catch (e) { result.localStorageError = String(e); }
+  try {
+    result.sessionStorageCleared = sessionStorage.length;
+    sessionStorage.clear();
+  } catch (e) { result.sessionStorageError = String(e); }
+  try {
+    if (indexedDB.databases) {
+      const dbs = await indexedDB.databases();
+      for (const db of dbs) {
+        if (!db.name) continue;
+        await new Promise((resolve) => {
+          let settled = false;
+          const done = () => {
+            if (!settled) { settled = true; clearTimeout(t); resolve(); }
+          };
+          const t = setTimeout(done, 3000);
+          const req = indexedDB.deleteDatabase(db.name);
+          req.onsuccess = done; req.onerror = done; req.onblocked = done;
+        });
+        result.indexedDB.push(db.name);
+      }
+    } else {
+      result.indexedDBError = "indexedDB.databases() 不可用";
+    }
+  } catch (e) { result.indexedDBError = String(e); }
+  return result;
 }
 """
 
 
-def extract_device_info(
+@dataclass
+class DeviceExtractResult:
+    """一次浏览器提取的结果：指纹 + 可选 Cookie + 清理摘要。"""
+    device_info: dict
+    cookies: list[dict] = field(default_factory=list)
+    cleared_cookie_names: list[str] = field(default_factory=list)
+    storage_report: dict | None = None
+    profile_dir: str = ""
+    used_temp_profile: bool = False
+
+
+def _launch_kwargs(
     profile_dir: str,
-    chrome_path: str = "",
-    headless: bool = True,
-    url: str = platform.HOME_URL,
-    timeout_ms: int = 60000,
-    wait_ms: int = 3000,
+    chrome_path: str,
+    headless: bool,
 ) -> dict:
-    """用 Playwright 在指定 Chrome 用户目录里打开页面，读出设备指纹字典。
-
-    Args:
-        profile_dir: Chrome 用户配置目录（即 `xdl login` 用的 `~/.xdl/chrome-profile`）。
-        chrome_path: Chrome 可执行文件路径；为空时由 Settings 默认探测。
-        headless: 是否无头；调试可置 False 看到浏览器。
-        url: 打开页面，默认喜马拉雅首页（必含 du_web_sdk）。
-        timeout_ms: 页面 goto 超时（毫秒）。
-        wait_ms: 加载完后等待 SDK 初始化的额外时间（毫秒）。
-
-    Raises:
-        RuntimeError: 未安装 Playwright 或页面未暴露 du_web_sdk。
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise RuntimeError(
-            "提取设备指纹需要安装 playwright：pip install playwright") from exc
-
-    os.makedirs(profile_dir, exist_ok=True)
-    info: Optional[dict] = None
-
-    launch_kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         headless=headless,
         viewport={"width": 1440, "height": 900},
         locale="zh-CN",
@@ -79,25 +113,178 @@ def extract_device_info(
         user_data_dir=profile_dir,
     )
     if chrome_path:
-        launch_kwargs["executable_path"] = chrome_path
+        kwargs["executable_path"] = chrome_path
     else:
-        # 用 Playwright 管理的 Chrome 会出现自动化痕迹，但提取只读、不发受保护请求，
-        # 不影响后续纯算签名。优先用系统 Google Chrome，回退到 Playwright 的 chromium。
-        launch_kwargs["channel"] = "chrome"
+        # 优先系统 Google Chrome；与 easy-sign 用 Edge channel 同类思路。
+        kwargs["channel"] = "chrome"
+    return kwargs
+
+
+def _filter_site_cookies(cookies: list[dict], domain: str = platform.BASE) -> list[dict]:
+    host = domain.replace("https://", "").replace("http://", "").split("/", 1)[0]
+    out = []
+    for c in cookies:
+        name = str(c.get("domain") or "")
+        if name.startswith("."):
+            if host == name[1:] or host.endswith(name):
+                out.append(c)
+        elif host == name or host.endswith("." + name):
+            out.append(c)
+    return out
+
+
+def _clear_device_cookies_in_context(ctx) -> list[str]:
+    """删除设备类 Cookie，保留登录 token 等业务 Cookie。"""
+    removed: list[str] = []
+    try:
+        all_cookies = ctx.cookies()
+    except Exception:
+        return removed
+    keep = []
+    for c in all_cookies:
+        if is_device_fingerprint_cookie(c.get("name")):
+            removed.append(str(c.get("name")))
+        else:
+            keep.append(c)
+    if not removed:
+        return removed
+    try:
+        ctx.clear_cookies()
+        if keep:
+            # Playwright 需要 url 或 domain/path 才能 add_cookies
+            normalized = []
+            for c in keep:
+                item = {
+                    "name": c.get("name"),
+                    "value": c.get("value"),
+                    "domain": c.get("domain") or ".ximalaya.com",
+                    "path": c.get("path") or "/",
+                }
+                if c.get("expires") is not None:
+                    item["expires"] = c["expires"]
+                if c.get("httpOnly") is not None:
+                    item["httpOnly"] = c["httpOnly"]
+                if c.get("secure") is not None:
+                    item["secure"] = c["secure"]
+                if c.get("sameSite"):
+                    item["sameSite"] = c["sameSite"]
+                normalized.append(item)
+            ctx.add_cookies(normalized)
+    except Exception:
+        # 清理失败时仍继续导航；调用方会从提取结果判断是否拿到新指纹
+        pass
+    return sorted(set(removed))
+
+
+def _read_collector(page) -> dict:
+    result = page.evaluate(_EXTRACT_JS)
+    if not isinstance(result, dict):
+        raise RuntimeError("提取脚本返回异常，无法解析 du_web_sdk。")
+    if result.get("ok") and isinstance(result.get("info"), dict):
+        return result["info"]
+    reason = result.get("reason") or "unknown"
+    keys = result.get("keys") or []
+    raise RuntimeError(
+        f"页面未暴露可用的 du_web_sdk 设备收集器（{reason}）。"
+        f" keys={keys[:20]!r}。可尝试 --no-headless 观察页面，或确认已打开喜马拉雅域。"
+    )
+
+
+def extract_device_info(
+    profile_dir: str,
+    chrome_path: str = "",
+    headless: bool = True,
+    url: str = platform.HOME_URL,
+    timeout_ms: int = 60000,
+    wait_ms: int = 3000,
+) -> dict:
+    """用 Playwright 在指定 Chrome 用户目录里打开页面，读出设备指纹字典。
+
+    只读提取，不清理设备态。若需要「重生」指纹，请用
+    `refresh_device_identity_via_browser`。
+    """
+    result = refresh_device_identity_via_browser(
+        profile_dir=profile_dir,
+        chrome_path=chrome_path,
+        headless=headless,
+        url=url,
+        timeout_ms=timeout_ms,
+        wait_ms=wait_ms,
+        clear_device_state=False,
+        fresh_profile=False,
+    )
+    return result.device_info
+
+
+def refresh_device_identity_via_browser(
+    profile_dir: str = "",
+    chrome_path: str = "",
+    headless: bool = True,
+    url: str = platform.HOME_URL,
+    timeout_ms: int = 60000,
+    wait_ms: int = 4000,
+    clear_device_state: bool = True,
+    fresh_profile: bool = False,
+    post_clear_wait_ms: int = 2500,
+) -> DeviceExtractResult:
+    """打开真实浏览器，可选清设备态后让 du_web_sdk 重生，再采集指纹与 Cookie。
+
+    Args:
+        profile_dir: 专用 Profile；`fresh_profile=True` 时忽略并使用临时目录。
+        clear_device_state: 导航前清设备 Cookie + storage，再二次加载以重生身份。
+        fresh_profile: 使用全新临时 Profile（完全新设备；不含登录态）。
+        wait_ms: 页面 load 后等待 SDK 初始化的时间。
+        post_clear_wait_ms: 清 storage 后再次 goto 等待 SDK 重生的时间。
+
+    Returns:
+        DeviceExtractResult：含 device_info、站点 Cookie、清理摘要。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "浏览器提取设备指纹需要安装 playwright：pip install playwright"
+        ) from exc
+
+    temp_dir: str | None = None
+    used_temp = False
+    if fresh_profile or not profile_dir:
+        temp_dir = tempfile.mkdtemp(prefix="xdl-device-")
+        work_profile = temp_dir
+        used_temp = True
+    else:
+        work_profile = profile_dir
+        os.makedirs(work_profile, exist_ok=True)
+
+    cleared: list[str] = []
+    storage_report: dict | None = None
+    info: Optional[dict] = None
+    cookies: list[dict] = []
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(**launch_kwargs)
+        ctx = p.chromium.launch_persistent_context(
+            **_launch_kwargs(work_profile, chrome_path, headless)
+        )
         try:
             page = ctx.new_page()
             page.goto(url, wait_until="load", timeout=timeout_ms)
             page.wait_for_timeout(wait_ms)
-            info = page.evaluate(_EXTRACT_JS)
-            if info is None:
-                # 也许 SDK 已加载但 `_deviceInfoCollector` 命名不同；重试一次。
-                info = page.evaluate(
-                    "() => window.du_web_sdk ? "
-                    "JSON.parse(JSON.stringify(window.du_web_sdk)) : null"
-                )
+
+            if clear_device_state:
+                cleared = _clear_device_cookies_in_context(ctx)
+                try:
+                    storage_report = page.evaluate(_CLEAR_STORAGE_JS)
+                except Exception as e:
+                    storage_report = {"error": str(e)}
+                # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份
+                page.goto(url, wait_until="load", timeout=timeout_ms)
+                page.wait_for_timeout(post_clear_wait_ms)
+
+            info = _read_collector(page)
+            try:
+                cookies = _filter_site_cookies(ctx.cookies())
+            except Exception:
+                cookies = []
         finally:
             try:
                 ctx.close()
@@ -105,10 +292,17 @@ def extract_device_info(
                 pass
 
     if info is None:
-        raise RuntimeError(
-            "页面未加载 du_web_sdk，无法提取设备指纹。"
-            "请确认已 `xdl login` 并在喜马拉雅域打开页面。")
-    return info
+        raise RuntimeError("未能从浏览器读取设备指纹。")
+
+    # 临时 Profile 用完即删目录元数据；不强制 rm tree（Windows 文件锁），调用方不依赖
+    return DeviceExtractResult(
+        device_info=info,
+        cookies=cookies,
+        cleared_cookie_names=cleared,
+        storage_report=storage_report if isinstance(storage_report, dict) else None,
+        profile_dir=work_profile,
+        used_temp_profile=used_temp,
+    )
 
 
 def save_device_info(device_info: dict, path: str) -> None:
@@ -118,3 +312,35 @@ def save_device_info(device_info: dict, path: str) -> None:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(device_info, f, ensure_ascii=False, indent=2)
+
+
+def identity_fingerprint(device_info: dict) -> str:
+    """对关键身份字段做短指纹，便于日志对比（不含完整 device_info）。"""
+    parts = [
+        str(device_info.get("HW5") or ""),
+        str(device_info.get("GJ2") or ""),
+        str(device_info.get("DP5") or ""),
+        str(device_info.get("adi") or ""),
+        str((device_info.get("fd2") or {}).get("xz7") or ""),
+    ]
+    raw = "|".join(parts).encode("utf-8", errors="ignore")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def summarize_extract(result: DeviceExtractResult) -> str:
+    """人类可读的一行摘要（不含 Cookie/指纹值）。"""
+    parts = [f"字段 {len(result.device_info)}"]
+    if result.cleared_cookie_names:
+        parts.append("清 Cookie: " + ", ".join(result.cleared_cookie_names[:12]))
+    if isinstance(result.storage_report, dict):
+        ls = int(result.storage_report.get("localStorageCleared") or 0)
+        ss = int(result.storage_report.get("sessionStorageCleared") or 0)
+        parts.append(f"localStorage={ls} sessionStorage={ss}")
+        idb = result.storage_report.get("indexedDB") or []
+        if idb:
+            parts.append("IndexedDB: " + ", ".join(str(x) for x in idb[:8]))
+    login = "已登录" if is_login_cookie(result.cookies) else "无登录 token"
+    parts.append(login)
+    if result.used_temp_profile:
+        parts.append("临时 Profile")
+    return "；".join(parts)

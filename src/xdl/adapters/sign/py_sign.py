@@ -147,7 +147,7 @@ class PySignProvider:
         _ = cache_ttl
         self._http_timeout = http_timeout
         self._user_agent = user_agent
-        # 设备指纹只加载一次
+        # 设备指纹只加载一次；可通过 reload() 替换（实验换身）。
         self._device_info: dict | None = None
         self._lock = threading.RLock()
 
@@ -156,17 +156,7 @@ class PySignProvider:
         with self._lock:
             if self._device_info is not None:
                 return
-            info = None
-            path = self._device_info_path
-            if path and os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        info = json.load(f)
-                except (OSError, ValueError) as e:
-                    print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
-            if info is None:
-                info = sign_conf.load_default_device_info()
-            self._device_info = info
+            self._device_info = self._load_device_info()
 
     def close(self) -> None:
         with self._lock:
@@ -184,7 +174,36 @@ class PySignProvider:
             cadd, sid = self._fresh_report()
             return f"{cadd}&&{sid}"
 
+    def reload(self, device_info: dict | None = None) -> None:
+        """替换当前设备指纹。
+
+        - `device_info is None`：重新从路径/内置模板加载；
+        - 传入 dict：使用该深拷贝，不写回磁盘。
+
+        供 HTTP 路径「换身」实验调用；默认下载链路不会自动调用。
+        """
+        with self._lock:
+            if device_info is None:
+                self._device_info = self._load_device_info()
+            else:
+                if not isinstance(device_info, dict) or not device_info:
+                    raise SignError("reload 需要非空 device_info dict")
+                self._device_info = copy.deepcopy(device_info)
+
     # ---- 内部 ----
+    def _load_device_info(self) -> dict:
+        info = None
+        path = self._device_info_path
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+            except (OSError, ValueError) as e:
+                print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
+        if info is None:
+            info = sign_conf.load_default_device_info()
+        return info
+
     def _fresh_report(self) -> tuple[str, str]:
         """单次 hdaa 上报：刷新 Zf5 → 上报 → 解析 (cadd, sid)。"""
         assert self._device_info is not None
