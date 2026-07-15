@@ -72,6 +72,7 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
                       experiment_rotate_device_on_risk=False,
                       experiment_strip_device_cookies=True,
                       experiment_max_rotations=0,
+                      experiment_persist_device_info=False,
                       response_bodies=None):
     """构造一个已经 ready 的 HttpSource（cookies 已加载、跳过浏览器提取）。"""
     cookies = cookies if cookies is not None else [
@@ -104,7 +105,7 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         experiment_rotate_device_on_risk=experiment_rotate_device_on_risk,
         experiment_strip_device_cookies=experiment_strip_device_cookies,
         experiment_max_rotations=experiment_max_rotations,
-        experiment_persist_device_info=False,
+        experiment_persist_device_info=experiment_persist_device_info,
         device_info_path="/fake/device-info.json",
     )
 
@@ -600,7 +601,54 @@ def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b"):
             cleared_cookie_names=["_xmLog"],
         ),
     )
-    monkeypatch.setattr(mod, "save_device_info", lambda *_a, **_k: None)
+
+
+def test_rotated_device_info_is_persisted_only_after_probe_success(monkeypatch):
+    src = _make_http_source(
+        monkeypatch,
+        experiment_rotate_device_on_risk=True,
+        experiment_persist_device_info=True,
+    )
+    _patch_browser_rotate(monkeypatch)
+    saved = []
+    import xdl.adapters.source_http as mod
+    monkeypatch.setattr(
+        mod, "save_device_info",
+        lambda info, path: saved.append((info["HW5"], path)),
+    )
+    _run_async(src.open())
+
+    assert _run_async(src._maybe_rotate_after_risk()) is True
+
+    assert saved == []
+    assert src._pending_device_info["HW5"] == "hw-b"
+
+    _run_async(src._mark_post_rotate_success())
+
+    assert saved == [("hw-b", "/fake/device-info.json")]
+    assert src._pending_device_info is None
+
+
+def test_immediate_risk_discards_unverified_device_info(monkeypatch):
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, risk],
+        experiment_rotate_device_on_risk=True,
+        experiment_persist_device_info=True,
+    )
+    _patch_browser_rotate(monkeypatch)
+    saved = []
+    import xdl.adapters.source_http as mod
+    monkeypatch.setattr(mod, "save_device_info", lambda *args: saved.append(args))
+    _run_async(src.open())
+
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("1"))
+
+    assert saved == []
+    assert src._pending_device_info is None
+    assert src._rotate_disabled is True
 
 
 def test_risk_control_rotates_then_retries(monkeypatch):

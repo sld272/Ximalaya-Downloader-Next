@@ -114,7 +114,7 @@ xdl gen-sign --device-info %USERPROFILE%\.xdl\device-info.json
 | `extract-device -o <路径>` | 指定指纹输出路径（默认 `~/.xdl/device-info.json`） |
 | `gen-sign --device-info <路径>` | 用指定指纹文件冒烟生成 `xm-sign` |
 
-换身后首次请求成功，本会话后续再遇风控仍可刷新；若换身后首次仍风控，本会话停用。更细的行为（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置，例如 `experiment_max_device_rotations=0` 表示不限次数。
+换身后首次请求成功，本会话后续再遇风控仍可刷新，并且只有此时才会原子写回新指纹；若换身后首次仍风控，本会话停用且保留磁盘上的旧指纹。更细的行为（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置，例如 `experiment_max_device_rotations=0` 表示不限次数。
 
 该能力**不保证**恢复可用，也不构成对平台访问控制的绕过。
 

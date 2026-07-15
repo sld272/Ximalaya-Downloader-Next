@@ -86,7 +86,7 @@ device_info
 
 专辑曲目清单由 `_album_list.py` 调用公开的 `/revision/album/getTracksList`，不需要 `xm-sign`。
 
-可选实验功能：`Settings.experiment_rotate_device_on_risk` 开启时，`HttpSource` 在已识别风控后通过浏览器清设备态、采集新的 `device_info`、`SignProvider.reload`，并重试当前曲。换身后首次成功才允许本会话再次换身；换身后首次仍风控则停用。默认关闭，不保证服务端接受。
+可选实验功能：`Settings.experiment_rotate_device_on_risk` 开启时，`HttpSource` 在已识别风控后通过浏览器清设备态、采集新的 `device_info`、`SignProvider.reload`，并重试当前曲。新指纹先只在会话内试用，首次成功后才原子写回；首次仍风控则停用并保留旧文件。默认关闭，不保证服务端接受。
 
 ### 3.4 Chrome 兼容音源
 

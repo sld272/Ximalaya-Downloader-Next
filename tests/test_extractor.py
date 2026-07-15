@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """设备指纹浏览器提取契约测试（不启动真实浏览器）。"""
+import json
+
 from xdl.adapters.sign.extractor import (
     DeviceExtractResult,
     _clear_device_cookies_in_context,
+    save_device_info,
     summarize_extract,
 )
 from xdl.adapters.sign.cookies import is_login_cookie
@@ -112,3 +115,13 @@ def test_clear_device_cookies_failure_never_clears_login_cookie():
     assert {cookie["name"] for cookie in context.cookies_data} == {
         "1&_token", "_xmLog",
     }
+
+
+def test_save_device_info_atomically_replaces_existing_file(tmp_path):
+    output = tmp_path / "device-info.json"
+    output.write_text("old", encoding="utf-8")
+
+    save_device_info({"HW5": "new"}, str(output))
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {"HW5": "new"}
+    assert list(tmp_path.glob(".device-info-*.tmp")) == []

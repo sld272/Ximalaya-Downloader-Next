@@ -150,6 +150,8 @@ class HttpSource:
         self._in_flight = 0
         self._device_rotations = 0
         self._device_fingerprint_was_reset = False
+        # 新指纹先只在当前 signer 中试用；首次受保护请求成功后才写入正式文件。
+        self._pending_device_info: dict | None = None
         # 换身策略：换身后首次请求成功 → 允许再次换身；
         # 换身后首次请求仍是风控 → 本会话停用换身，避免无效连打。
         self._rotate_awaiting_success = False
@@ -248,7 +250,7 @@ class HttpSource:
             try:
                 track = await self._get_track_once(track_id)
                 if rotated_for_this_track:
-                    self._mark_post_rotate_success()
+                    await self._mark_post_rotate_success()
                 return track
             except RiskControlError:
                 if rotated_for_this_track:
@@ -376,10 +378,19 @@ class HttpSource:
         finally:
             self._in_flight -= 1
 
-    def _mark_post_rotate_success(self) -> None:
+    async def _mark_post_rotate_success(self) -> None:
         """换身后的首次成功：证明新指纹可用，允许本会话后续再次换身。"""
         if not self._rotate_awaiting_success:
             return
+        pending_info = self._pending_device_info
+        self._pending_device_info = None
+        if pending_info is not None and self._device_info_path:
+            try:
+                await asyncio.to_thread(
+                    save_device_info, pending_info, self._device_info_path,
+                )
+            except OSError as e:
+                print(f"[warn] 已验证的新设备指纹写盘失败: {e}")
         self._rotate_awaiting_success = False
         print(
             f"[experiment] 换身后请求成功（累计换身 {self._device_rotations} 次），"
@@ -388,6 +399,7 @@ class HttpSource:
 
     def _disable_rotate_after_immediate_risk(self) -> None:
         """换身后首次请求仍风控：本会话停用换身，避免无效连打。"""
+        self._pending_device_info = None
         self._rotate_awaiting_success = False
         if self._rotate_disabled:
             return
@@ -456,11 +468,9 @@ class HttpSource:
 
         new_info = result.device_info
         await asyncio.to_thread(reload_fn, new_info)
-        if self._experiment_persist and self._device_info_path:
-            try:
-                await asyncio.to_thread(save_device_info, new_info, self._device_info_path)
-            except OSError as e:
-                print(f"[warn] 新设备指纹写盘失败: {e}")
+        self._pending_device_info = (
+            new_info if self._experiment_persist and self._device_info_path else None
+        )
 
         self._device_rotations += 1
         self._device_fingerprint_was_reset = True

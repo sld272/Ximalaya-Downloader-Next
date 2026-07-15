@@ -295,12 +295,22 @@ def refresh_device_identity_via_browser(
 
 
 def save_device_info(device_info: dict, path: str) -> None:
-    """保存设备指纹到 JSON 文件。"""
+    """原子保存设备指纹到 JSON 文件。"""
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(device_info, f, ensure_ascii=False, indent=2)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".device-info-", suffix=".tmp", dir=directory or ".",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(device_info, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def identity_fingerprint(device_info: dict) -> str:
