@@ -16,7 +16,7 @@ import pytest
 from xdl.adapters.source_http import HttpSource
 from xdl.config import sign as sign_conf
 from xdl.domain import Track, PlayUrl
-from xdl.errors import RiskControlError, AuthError
+from xdl.errors import RiskControlError, AuthError, NetworkError
 
 
 class FakeSignProvider:
@@ -137,7 +137,10 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         assert "/mobile-playpage/track/v3/baseInfo/" in url, f"url={url}"
         if not responses:
             raise AssertionError("Unexpected extra baseInfo call")
-        return _FakeResp(responses.pop(0))
+        result = responses.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return _FakeResp(result)
 
     # patch HttpSource._http_get（统一拦下两层：curl-cffi 与 requests）
     monkeypatch.setattr(mod.HttpSource, "_http_get", lambda self, u, p, h: fake_get(u, p, h))
@@ -649,6 +652,58 @@ def test_immediate_risk_discards_unverified_device_info(monkeypatch):
     assert saved == []
     assert src._pending_device_info is None
     assert src._rotate_disabled is True
+
+
+def test_network_error_after_rotate_can_be_validated_by_external_retry(monkeypatch):
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [
+                {"type": "MP3_64", "url": "enc://ok", "fileSize": 1},
+            ],
+        },
+    }
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, RuntimeError("network down"), ok, risk, ok],
+        experiment_rotate_device_on_risk=True,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+
+    with pytest.raises(NetworkError):
+        _run_async(src.get_track("1"))
+    assert src._rotate_awaiting_success is True
+    assert src._device_rotations == 1
+
+    assert _run_async(src.get_track("1")).title == "ok"
+    assert src._rotate_awaiting_success is False
+
+    assert _run_async(src.get_track("2")).title == "ok"
+    assert src._device_rotations == 2
+
+
+def test_risk_on_external_retry_disables_pending_rotation(monkeypatch):
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, RuntimeError("network down"), risk],
+        experiment_rotate_device_on_risk=True,
+        experiment_persist_device_info=True,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+
+    with pytest.raises(NetworkError):
+        _run_async(src.get_track("1"))
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("1"))
+
+    assert src._rotate_disabled is True
+    assert src._rotate_awaiting_success is False
+    assert src._pending_device_info is None
 
 
 def test_risk_control_rotates_then_retries(monkeypatch):

@@ -152,6 +152,7 @@ class HttpSource:
         self._device_fingerprint_was_reset = False
         # 新指纹先只在当前 signer 中试用；首次受保护请求成功后才写入正式文件。
         self._pending_device_info: dict | None = None
+        self._pending_device_generation: int | None = None
         # 换身策略：换身后首次请求成功 → 允许再次换身；
         # 换身后首次请求仍是风控 → 本会话停用换身，避免无效连打。
         self._rotate_awaiting_success = False
@@ -245,20 +246,21 @@ class HttpSource:
             raise NetworkError("会话未打开，请先 await open()。")
         # 风控换身：本曲最多换一次；换身后首次成功则本会话允许后续再换，
         # 换身后首次仍风控则停用本会话换身。默认关闭时循环只跑一轮。
-        rotated_for_this_track = False
         while True:
+            request_generation = self._device_rotations
             try:
                 track = await self._get_track_once(track_id)
-                if rotated_for_this_track:
+                if (self._rotate_awaiting_success
+                        and request_generation == self._pending_device_generation):
                     await self._mark_post_rotate_success()
                 return track
             except RiskControlError:
-                if rotated_for_this_track:
+                if (self._rotate_awaiting_success
+                        and request_generation == self._pending_device_generation):
                     self._disable_rotate_after_immediate_risk()
                     raise
                 if not await self._maybe_rotate_after_risk():
                     raise
-                rotated_for_this_track = True
                 # 换身成功：用新 device_info / Cookie 重试当前曲目。
 
     async def _get_track_once(self, track_id: str) -> Track:
@@ -384,6 +386,7 @@ class HttpSource:
             return
         pending_info = self._pending_device_info
         self._pending_device_info = None
+        self._pending_device_generation = None
         if pending_info is not None and self._device_info_path:
             try:
                 await asyncio.to_thread(
@@ -400,6 +403,7 @@ class HttpSource:
     def _disable_rotate_after_immediate_risk(self) -> None:
         """换身后首次请求仍风控：本会话停用换身，避免无效连打。"""
         self._pending_device_info = None
+        self._pending_device_generation = None
         self._rotate_awaiting_success = False
         if self._rotate_disabled:
             return
@@ -468,11 +472,11 @@ class HttpSource:
 
         new_info = result.device_info
         await asyncio.to_thread(reload_fn, new_info)
+        self._device_rotations += 1
         self._pending_device_info = (
             new_info if self._experiment_persist and self._device_info_path else None
         )
-
-        self._device_rotations += 1
+        self._pending_device_generation = self._device_rotations
         self._device_fingerprint_was_reset = True
         fp = identity_fingerprint(new_info)
         limit = (str(self._experiment_max_rotations)
