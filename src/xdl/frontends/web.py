@@ -2,6 +2,9 @@
 """FastAPI WebUI 入口与 JSON API。"""
 from __future__ import annotations
 
+import argparse
+import threading
+import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -203,3 +206,30 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
         def root():
             return {"name": "XDL WebUI", "api": "/api/docs"}
     return app
+
+
+def serve(*, host: str = "127.0.0.1", port: int = 8787,
+          open_browser: bool = True) -> int:
+    import uvicorn
+
+    url = f"http://{host}:{port}"
+    if open_browser:
+        timer = threading.Timer(0.8, lambda: webbrowser.open(url))
+        timer.daemon = True
+        timer.start()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        print("[警告] WebUI 没有远程访问认证；请只在可信网络监听非本机地址。")
+    print(f"XDL WebUI: {url}")
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="启动 XDL 本地 WebUI")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    parser.add_argument("--port", type=int, default=8787, help="监听端口（默认 8787）")
+    parser.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("端口必须在 1 到 65535 之间")
+    return serve(host=args.host, port=args.port, open_browser=not args.no_open)

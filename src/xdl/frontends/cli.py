@@ -184,6 +184,13 @@ def _cmd_refresh_cookies(app: Facade, args) -> int:
     return 0
 
 
+def _cmd_web(app: Facade, args) -> int:
+    """启动本地 WebUI；由 Web 运行器自行装配 Facade。"""
+    from .web import serve
+    return serve(host=args.host, port=args.port,
+                 open_browser=not args.no_open)
+
+
 def _print_album_result(result) -> None:
     print("\n" + result.summary())
     if result.failed:
@@ -208,9 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(
         dest="command", required=True,
-        metavar="{login,track,album,resume,gen-sign,risk-report}",
+        metavar="{web,login,track,album,resume,gen-sign,risk-report}",
     )
 
+    p_web = sub.add_parser("web", help="启动本地 WebUI")
+    p_web.add_argument("--host", default="127.0.0.1",
+                       help="监听地址（默认 127.0.0.1）")
+    p_web.add_argument("--port", type=_port, default=8787,
+                       help="监听端口（默认 8787）")
+    p_web.add_argument("--no-open", action="store_true",
+                       help="启动后不自动打开浏览器")
     sub.add_parser("login", help="打开浏览器登录并保存会话")
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
@@ -274,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "experiment_rotate_device", False):
         settings.experiment_rotate_device_on_risk = True
     handlers = {
+        "web": _cmd_web,
         "login": _cmd_login,
         "track": _cmd_track,
         "album": _cmd_album,
@@ -305,6 +320,13 @@ def _positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("必须是大于 0 的整数")
+    return number
+
+
+def _port(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 65535:
+        raise argparse.ArgumentTypeError("端口必须在 1 到 65535 之间")
     return number
 
 

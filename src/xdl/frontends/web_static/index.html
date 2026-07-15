@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f6f8fa">
+  <title>XDL · 下载任务</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand" aria-label="XDL 首页">
+        <span class="brand-mark">XDL</span>
+        <span class="brand-caption">audio desk</span>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item is-active" type="button" data-view="tasks">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+          <span>任务</span>
+        </button>
+        <button class="nav-item" type="button" data-action="focus-composer">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          <span>新建下载</span>
+        </button>
+        <button class="nav-item" type="button" data-view="diagnostics">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18V9m5 9V5m5 13v-6m5 6V3"/></svg>
+          <span>风控与诊断</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.55 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.55a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.45 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.09.38.3.73.6 1 .3.28.7.42 1.1.4h.09v4h-.09a1.7 1.7 0 0 0-1.7.6Z"/></svg>
+          <span>设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="local-dot" aria-hidden="true"></span>
+        <span>仅在本机运行</span>
+      </div>
+    </aside>
+
+    <header class="topbar">
+      <button class="mobile-brand" type="button" data-view="tasks">XDL</button>
+      <div class="topbar-spacer"></div>
+      <div class="status-cluster">
+        <button class="status-button" id="login-status" type="button" data-action="login">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="login-status-text">正在检查登录态</span>
+        </button>
+        <span class="status-divider" aria-hidden="true"></span>
+        <span class="status-label" id="backend-status">HTTP 后端</span>
+        <span class="status-label" id="concurrency-status">并发 1</span>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <section class="view-panel is-active" id="view-tasks" data-view-panel="tasks">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">DOWNLOAD WORKSPACE</p>
+            <h1>下载任务</h1>
+            <p class="page-description">添加你有权访问的专辑或单曲，进度会自动保存。</p>
+          </div>
+          <div class="heading-actions">
+            <button class="button secondary" type="button" data-action="open-downloads">
+              打开下载目录
+            </button>
+            <button class="button secondary" type="button" data-action="resume">
+              恢复全部
+            </button>
+          </div>
+        </div>
+
+        <form class="composer" id="download-form">
+          <div class="composer-type" role="group" aria-label="下载类型">
+            <button class="type-button is-active" type="button" data-mode="album">专辑</button>
+            <button class="type-button" type="button" data-mode="track">单曲</button>
+          </div>
+          <label class="field composer-target">
+            <span class="sr-only">专辑或曲目链接或 ID</span>
+            <input id="download-target" name="target" autocomplete="off"
+                   placeholder="粘贴专辑 / 曲目链接或 ID" required>
+          </label>
+          <label class="field compact-field">
+            <span class="sr-only">音质</span>
+            <select id="download-quality" name="quality">
+              <option value="standard">标准音质</option>
+              <option value="high">高音质</option>
+              <option value="low">低音质</option>
+            </select>
+          </label>
+          <label class="field compact-field range-field">
+            <span class="sr-only">下载区间</span>
+            <input id="download-range" name="range" placeholder="全部集数">
+          </label>
+          <button class="button primary composer-submit" type="submit">
+            开始下载
+          </button>
+        </form>
+        <p class="composer-hint" id="composer-hint">区间支持 1-20、5-、-10 或单集序号。</p>
+
+        <section class="operation-strip is-hidden" id="operation-strip" aria-live="polite">
+          <div class="operation-main">
+            <span class="operation-state" id="operation-state">进行中</span>
+            <div class="operation-copy">
+              <strong id="operation-title">正在准备</strong>
+              <span id="operation-message">任务将在后台运行</span>
+            </div>
+          </div>
+          <div class="operation-progress" id="operation-progress" role="progressbar"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <span></span>
+          </div>
+          <button class="button danger-subtle" id="stop-button" type="button" data-action="stop">
+            优雅停止
+          </button>
+          <details class="operation-log">
+            <summary>运行记录</summary>
+            <ol id="operation-notes"></ol>
+          </details>
+        </section>
+
+        <div class="task-toolbar">
+          <div class="filter-list" role="tablist" aria-label="任务状态">
+            <button class="filter-button is-active" type="button" data-filter="all">
+              全部 <span id="count-all">0</span>
+            </button>
+            <button class="filter-button" type="button" data-filter="downloading">
+              进行中 <span id="count-downloading">0</span>
+            </button>
+            <button class="filter-button" type="button" data-filter="pending">
+              待恢复 <span id="count-pending">0</span>
+            </button>
+            <button class="filter-button" type="button" data-filter="done">
+              已完成 <span id="count-done">0</span>
+            </button>
+            <button class="filter-button" type="button" data-filter="failed">
+              失败 <span id="count-failed">0</span>
+            </button>
+          </div>
+          <label class="task-search">
+            <span class="sr-only">搜索任务</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input id="task-search" type="search" placeholder="搜索曲目或 ID">
+          </label>
+        </div>
+
+        <div class="inline-alert is-hidden" id="task-error" role="alert"></div>
+
+        <div class="task-table-wrap">
+          <table class="task-table">
+            <thead>
+              <tr>
+                <th>曲目</th>
+                <th>状态</th>
+                <th>音质</th>
+                <th>大小</th>
+                <th>进度</th>
+                <th><span class="sr-only">操作</span></th>
+              </tr>
+            </thead>
+            <tbody id="task-list"></tbody>
+          </table>
+          <div class="empty-state" id="task-empty">
+            <div class="empty-icon" aria-hidden="true">↓</div>
+            <h2>还没有下载任务</h2>
+            <p>粘贴专辑或曲目链接，第一条任务会出现在这里。</p>
+            <button class="button secondary" type="button" data-action="focus-composer">添加下载</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view-panel" id="view-diagnostics" data-view-panel="diagnostics">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">RISK &amp; DIAGNOSTICS</p>
+            <h1>风控与诊断</h1>
+            <p class="page-description">所有报告均来自本地记录，不会额外请求受保护接口。</p>
+          </div>
+          <button class="button secondary" type="button" data-action="refresh-risk">刷新报告</button>
+        </div>
+
+        <section class="risk-overview">
+          <div class="section-heading">
+            <div>
+              <h2>风控概览</h2>
+              <p id="risk-path">正在读取本地观测文件</p>
+            </div>
+          </div>
+          <div class="metric-row">
+            <div class="metric"><span>总请求</span><strong id="risk-total">—</strong></div>
+            <div class="metric"><span>首次风控序号</span><strong id="risk-first">—</strong></div>
+            <div class="metric"><span>最大同时在途</span><strong id="risk-inflight">—</strong></div>
+            <div class="metric"><span>平均请求 / 分钟</span><strong id="risk-rate">—</strong></div>
+          </div>
+          <div class="risk-detail-grid">
+            <div>
+              <h3>结果分布</h3>
+              <div class="distribution" id="risk-outcomes"></div>
+            </div>
+            <div>
+              <h3>延迟</h3>
+              <dl class="definition-list" id="risk-latency"></dl>
+            </div>
+          </div>
+        </section>
+
+        <section class="diagnostic-section">
+          <div class="section-heading">
+            <div>
+              <h2>常用诊断</h2>
+              <p>这些操作与下载队列互斥，避免同时占用浏览器或音源会话。</p>
+            </div>
+          </div>
+          <div class="action-list">
+            <form class="action-row" id="formats-form">
+              <div class="action-copy">
+                <h3>探测曲目音质</h3>
+                <p>只读取格式、码率与文件大小，不下载音频。</p>
+              </div>
+              <input id="formats-target" placeholder="曲目链接或 trackId" required>
+              <button class="button secondary" type="submit">开始探测</button>
+            </form>
+            <div class="action-row">
+              <div class="action-copy">
+                <h3>刷新登录凭据</h3>
+                <p>从专用 Chrome Profile 重新导出 Cookie；匿名结果不会覆盖缓存。</p>
+              </div>
+              <label class="check-control"><input id="cookies-visible" type="checkbox"> 显示浏览器</label>
+              <button class="button secondary" type="button" data-action="refresh-cookies">刷新凭据</button>
+            </div>
+            <div class="action-row">
+              <div class="action-copy">
+                <h3>检查浏览器存储</h3>
+                <p>仅列出设备标识相关 key 名，不读取 value。</p>
+              </div>
+              <span></span>
+              <button class="button secondary" type="button" data-action="inspect-storage">运行检查</button>
+            </div>
+            <form class="action-row" id="sign-form">
+              <div class="action-copy">
+                <h3>xm-sign 冒烟</h3>
+                <p>生成签名用于检查本地链路，不请求播放信息。</p>
+              </div>
+              <label class="inline-number">次数 <input id="sign-repeat" type="number" min="1" max="20" value="1"></label>
+              <button class="button secondary" type="submit">生成签名</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="diagnostic-section experimental-section">
+          <div class="section-heading">
+            <div>
+              <span class="tag warning">高级</span>
+              <h2>设备信息采集</h2>
+              <p>可能会启动浏览器或清理设备态。它不是认证或风控绕过手段。</p>
+            </div>
+          </div>
+          <form class="extract-form" id="extract-form">
+            <label class="field-row"><span>输出路径</span><input id="extract-output" placeholder="使用设置中的默认路径"></label>
+            <label class="field-row"><span>Profile 路径</span><input id="extract-profile" placeholder="使用专用 Chrome Profile"></label>
+            <div class="toggle-grid">
+              <label class="switch-row"><input id="extract-visible" type="checkbox"><span>显示浏览器</span></label>
+              <label class="switch-row"><input id="extract-refresh" type="checkbox"><span>先清设备状态再采集</span></label>
+              <label class="switch-row"><input id="extract-fresh" type="checkbox"><span>使用全新临时 Profile</span></label>
+            </div>
+            <button class="button secondary" type="submit">开始采集</button>
+          </form>
+        </section>
+      </section>
+
+      <section class="view-panel" id="view-settings" data-view-panel="settings">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">LOCAL SETTINGS</p>
+            <h1>设置</h1>
+            <p class="page-description">保存后会重建本地运行器；正在下载时不能修改。</p>
+          </div>
+        </div>
+
+        <form class="settings-form" id="settings-form">
+          <section class="settings-section">
+            <div class="settings-intro">
+              <h2>下载</h2>
+              <p>控制文件位置、默认音质与任务并发。</p>
+            </div>
+            <div class="settings-fields">
+              <label class="field-row"><span>下载目录</span><input name="download_dir" required></label>
+              <label class="field-row"><span>默认音质</span>
+                <select name="default_quality"><option value="standard">标准</option><option value="high">高</option><option value="low">低</option></select>
+              </label>
+              <label class="field-row"><span>音源后端</span>
+                <select name="source_backend"><option value="http">HTTP（推荐）</option><option value="chrome">Chrome（兼容）</option></select>
+              </label>
+              <label class="field-row"><span>异步并发数</span><input name="max_concurrency" type="number" min="1" max="16" required></label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-intro">
+              <h2>超时与重试</h2>
+              <p>保守设置更不容易触发平台风控。</p>
+            </div>
+            <div class="settings-fields field-grid">
+              <label class="field-row"><span>解析超时（秒）</span><input name="resolve_timeout" type="number" min="1"></label>
+              <label class="field-row"><span>下载超时（秒）</span><input name="http_timeout" type="number" min="1"></label>
+              <label class="field-row"><span>单任务尝试次数</span><input name="max_attempts" type="number" min="1"></label>
+              <label class="field-row"><span>退避基数（秒）</span><input name="retry_backoff_base" type="number" min="0" step="0.1"></label>
+              <label class="field-row"><span>风控冷却（秒）</span><input name="cooldown" type="number" min="0" step="0.1"></label>
+              <label class="field-row"><span>失败收尾轮数</span><input name="global_retry_rounds" type="number" min="0"></label>
+            </div>
+          </section>
+
+          <details class="settings-details">
+            <summary>路径与浏览器</summary>
+            <div class="settings-fields details-fields">
+              <label class="field-row"><span>Chrome 路径</span><input name="chrome_path"></label>
+              <label class="field-row"><span>Chrome Profile</span><input name="chrome_profile_dir"></label>
+              <label class="field-row"><span>CDP 端口</span><input name="cdp_port" type="number" min="1" max="65535"></label>
+              <label class="field-row"><span>任务库</span><input name="task_db_path"></label>
+              <label class="field-row"><span>风控日志</span><input name="risk_log_path"></label>
+              <label class="field-row"><span>设备信息</span><input name="device_info_path"></label>
+              <label class="field-row"><span>Cookie 缓存</span><input name="cookies_cache_path"></label>
+              <label class="field-row"><span>HTTP 浏览器标识</span><input name="source_impersonate"></label>
+              <div class="toggle-grid wide">
+                <label class="switch-row"><input name="chrome_headless" type="checkbox"><span>Chrome 默认无头运行</span></label>
+                <label class="switch-row"><input name="risk_fallback_headful" type="checkbox"><span>需要人工验证时显示浏览器</span></label>
+              </div>
+            </div>
+          </details>
+
+          <details class="settings-details warning-details">
+            <summary>实验功能</summary>
+            <div class="settings-fields details-fields">
+              <p class="settings-warning">设备身份刷新不保证恢复可用，也不能替代登录或内容授权。</p>
+              <div class="toggle-grid wide">
+                <label class="switch-row"><input name="experiment_rotate_device_on_risk" type="checkbox"><span>风控后尝试刷新设备身份</span></label>
+                <label class="switch-row"><input name="experiment_browser_clear_state" type="checkbox"><span>采集前清设备状态</span></label>
+                <label class="switch-row"><input name="experiment_browser_fresh_profile" type="checkbox"><span>使用临时新 Profile</span></label>
+                <label class="switch-row"><input name="experiment_persist_device_info" type="checkbox"><span>成功后保存设备信息</span></label>
+                <label class="switch-row"><input name="experiment_strip_device_cookies" type="checkbox"><span>刷新时剥离设备 Cookie</span></label>
+              </div>
+              <label class="field-row"><span>最多刷新次数（0 为不限）</span><input name="experiment_max_device_rotations" type="number" min="0"></label>
+            </div>
+          </details>
+
+          <div class="settings-actions">
+            <span id="settings-path-note">设置保存在本机用户目录。</span>
+            <button class="button primary" type="submit">保存设置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog class="result-dialog" id="result-dialog">
+    <form method="dialog" class="dialog-shell">
+      <div class="dialog-header">
+        <div>
+          <span class="tag" id="dialog-tag">操作结果</span>
+          <h2 id="dialog-title">操作已完成</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </div>
+      <div class="dialog-content" id="dialog-content"></div>
+      <div class="dialog-actions">
+        <button class="button primary" value="default">完成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

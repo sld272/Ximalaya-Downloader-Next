@@ -89,6 +89,18 @@ def test_web_api_bootstrap_and_download_contract():
     assert runtime.calls[-1] == ("shutdown",)
 
 
+def test_webui_static_shell_is_served():
+    with TestClient(create_app(FakeRuntime())) as client:
+        page = client.get("/")
+        script = client.get("/app.js")
+        styles = client.get("/styles.css")
+
+    assert page.status_code == 200
+    assert "下载任务" in page.text
+    assert "javascript" in script.headers["content-type"]
+    assert "text/css" in styles.headers["content-type"]
+
+
 def test_web_api_rejects_invalid_download_shape():
     with TestClient(create_app(FakeRuntime())) as client:
         response = client.post("/api/operations/download", json={
