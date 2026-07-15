@@ -59,6 +59,17 @@ class PlayUrl:
     file_size: int = 0
 
     @property
+    def codec(self) -> str:
+        """返回音质类型中的编码名称；未知格式保留平台给出的名称。"""
+        head = (self.type or "").split("_", 1)[0]
+        return head.upper() if head else "?"
+
+    @property
+    def bitrate(self) -> int:
+        """返回音质类型中的码率；无法识别时返回 0。"""
+        return _type_score(self.type)[0]
+
+    @property
     def is_m4a(self) -> bool:
         return self.type.startswith("M4A") or ".m4a" in self.url.lower()
 
@@ -95,6 +106,14 @@ class Track:
     play_urls: list[PlayUrl] = field(default_factory=list)
     is_paid: bool = False
     is_authorized: bool = True
+
+    def available_play_urls(self) -> list[PlayUrl]:
+        """返回带有效地址的资源，并按音质协商规则从高到低排序。"""
+        return sorted(
+            (p for p in self.play_urls if p.url),
+            key=lambda p: _type_score(p.type),
+            reverse=True,
+        )
 
     def select(self, quality: Quality) -> PlayUrl | None:
         """按音质协商选出一个可用的 PlayUrl。"""

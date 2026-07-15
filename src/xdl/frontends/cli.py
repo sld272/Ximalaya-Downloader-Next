@@ -54,10 +54,41 @@ def _cmd_login(app: Facade, args) -> int:
 
 
 def _cmd_track(app: Facade, args) -> int:
+    if args.list_formats:
+        return _cmd_list_formats(app, args)
     path = app.download_track(args.target, quality=args.quality,
                               reporter=ConsoleProgress())
     print(f"已保存: {path}")
     return 0
+
+
+def _cmd_list_formats(app: Facade, args) -> int:
+    info = app.list_formats(args.target)
+    formats = info["formats"]
+
+    print(f"曲目: {info['title']}")
+    print(f"ID: {info['track_id']}")
+    print(f"默认音质: {info['default_quality']}")
+    print()
+    print(f"{'ID':>3s}  {'格式':12s} {'编码':>5s}  {'码率':>6s}  {'文件大小':>10s}")
+    print(f"{'---':3s}  {'----------':12s} {'-----':>5s}  {'------':>6s}  {'----------':>10s}")
+    for i, f in enumerate(formats):
+        bitrate = f"{f['bitrate']}k" if f["bitrate"] > 0 else "?"
+        size_str = _fmt_size(f["file_size"])
+        print(f"{i:3d}  {f['type']:12s} {f['codec']:>5s}  {bitrate:>6s}  {size_str:>10s}")
+    print()
+    print(f"共 {len(formats)} 种格式")
+    return 0
+
+
+def _fmt_size(size_bytes: int) -> str:
+    if size_bytes <= 0:
+        return "未知"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 def _cmd_album(app: Facade, args) -> int:
@@ -191,6 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_track.add_argument("target", help="音频链接或 trackId")
     p_track.add_argument("--quality", choices=["high", "standard", "low"],
                          help="音质（默认 standard，缺失时自动回退）")
+    p_track.add_argument("-F", "--list-formats", action="store_true",
+                         help="列出所有可用音质格式（类似 yt-dlp -F）")
 
     p_album = sub.add_parser("album", help="顺序批量下载整张专辑")
     p_album.add_argument("target", help="专辑链接或 albumId")

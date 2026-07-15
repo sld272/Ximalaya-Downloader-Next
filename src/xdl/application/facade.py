@@ -12,7 +12,7 @@ import signal
 import threading
 from collections.abc import Callable
 
-from ..domain import Quality, parse_range
+from ..domain import Quality, parse_range, parse_track_id
 from ..errors import XdlError
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
@@ -68,6 +68,14 @@ class Facade:
         """只读：返回任务库中的全部任务（供 TUI/GUI 渲染面板）。无任务库时返回 []。"""
         store = self._task_store()
         return store.all_tasks() if store is not None else []
+
+    def list_formats(self, target: str) -> dict:
+        """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
+
+        返回曲目信息及已排序的格式元数据。本方法不发起音频下载请求，
+        也不向调用方返回播放 URL。
+        """
+        return asyncio.run(self._list_formats(target))
 
     def inspect_storage(self) -> dict:
         """诊断：列出当前 Profile 的设备标识存储 key 名（不读 value），
@@ -141,6 +149,29 @@ class Facade:
         finally:
             self._cancel_task(watcher)
             cleanup_signal()
+
+    async def _list_formats(self, target: str) -> dict:
+        track_id = parse_track_id(target)
+        await self._source.open()
+        try:
+            track = await self._source.get_track(track_id)
+        finally:
+            await self._source.close()
+        formats = [
+            {
+                "type": p.type,
+                "codec": p.codec,
+                "bitrate": p.bitrate,
+                "file_size": p.file_size,
+            }
+            for p in track.available_play_urls()
+        ]
+        return {
+            "title": track.title,
+            "track_id": track.track_id,
+            "formats": formats,
+            "default_quality": self._settings.default_quality,
+        }
 
     def _watch_external_cancel(self, cancel: threading.Event | None,
                                stop_event: asyncio.Event,
