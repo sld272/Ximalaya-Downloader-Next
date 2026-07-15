@@ -34,6 +34,26 @@ def test_playurl_ext():
     assert PlayUrl("MP3_64", "x.mp3").ext == ".mp3"
 
 
+def test_playurl_exposes_format_metadata():
+    assert PlayUrl("m4a_64", "x.m4a").codec == "M4A"
+    assert PlayUrl("m4a_64", "x.m4a").bitrate == 64
+    assert PlayUrl("LOSSLESS", "x.bin").codec == "LOSSLESS"
+    assert PlayUrl("LOSSLESS", "x.bin").bitrate == 0
+
+
+def test_track_available_play_urls_are_filtered_and_ranked():
+    track = Track("1", "标题", [
+        PlayUrl("MP3_32", "u32"),
+        PlayUrl("M4A_64", "u64"),
+        PlayUrl("MP3_128", ""),
+        PlayUrl("LOSSLESS", "unknown"),
+    ])
+
+    assert [p.type for p in track.available_play_urls()] == [
+        "M4A_64", "MP3_32", "LOSSLESS",
+    ]
+
+
 @pytest.mark.parametrize("raw,expected", [
     ("123456", "123456"),
     ("https://www.ximalaya.com/sound/789", "789"),

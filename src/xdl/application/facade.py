@@ -12,7 +12,7 @@ import signal
 import threading
 from collections.abc import Callable
 
-from ..domain import Quality, parse_range
+from ..domain import Quality, parse_range, parse_track_id
 from ..errors import XdlError
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
@@ -72,9 +72,8 @@ class Facade:
     def list_formats(self, target: str) -> dict:
         """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
 
-        返回 {'title': str, 'track_id': str, 'formats': [{type, file_size}],
-               'default_quality': str}
-        URL 不解密——本方法只用于展示格式清单，不发下载请求。
+        返回曲目信息及已排序的格式元数据。本方法不发起音频下载请求，
+        也不向调用方返回播放 URL。
         """
         return asyncio.run(self._list_formats(target))
 
@@ -152,17 +151,21 @@ class Facade:
             cleanup_signal()
 
     async def _list_formats(self, target: str) -> dict:
-        from ..domain import parse_track_id
         track_id = parse_track_id(target)
         await self._source.open()
         try:
             track = await self._source.get_track(track_id)
         finally:
             await self._source.close()
-        formats = []
-        for p in track.play_urls:
-            if p.url:
-                formats.append({"type": p.type, "file_size": p.file_size})
+        formats = [
+            {
+                "type": p.type,
+                "codec": p.codec,
+                "bitrate": p.bitrate,
+                "file_size": p.file_size,
+            }
+            for p in track.available_play_urls()
+        ]
         return {
             "title": track.title,
             "track_id": track.track_id,

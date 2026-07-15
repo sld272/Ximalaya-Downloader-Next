@@ -44,6 +44,7 @@ xdl album <专辑链接或 albumId>
 ```bash
 xdl login                              # 首次登录或重新登录
 xdl track <链接或ID>                    # 下载单个音频
+xdl track -F <链接或ID>                 # 列出所有可用音质格式，不下载
 xdl album <链接或ID>                    # 下载整张专辑
 xdl album <链接或ID> --range 1-20       # 只下载指定区间
 xdl album <链接或ID> --quality high     # high / standard / low
@@ -64,6 +65,7 @@ xdl --concurrency 3 resume
 
 ### 下载行为
 
+- `xdl track -F <链接或ID>` 会按码率和编码优先级列出可用格式，只读取播放元数据，不下载音频。
 - 音质缺失时会自动回退到可用规格。
 - 已存在的完整文件会跳过。
 - 未完成的 `.part` 文件支持 HTTP Range 续传。

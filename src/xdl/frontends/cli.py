@@ -64,10 +64,7 @@ def _cmd_track(app: Facade, args) -> int:
 
 def _cmd_list_formats(app: Facade, args) -> int:
     info = app.list_formats(args.target)
-    # 按码率+编码排序，与 Quality.negotiate 一致
-    from ..domain.models import _type_score
-    formats = sorted(info["formats"], key=lambda f: _type_score(f["type"]),
-                     reverse=True)
+    formats = info["formats"]
 
     print(f"曲目: {info['title']}")
     print(f"ID: {info['track_id']}")
@@ -76,11 +73,9 @@ def _cmd_list_formats(app: Facade, args) -> int:
     print(f"{'ID':>3s}  {'格式':12s} {'编码':>5s}  {'码率':>6s}  {'文件大小':>10s}")
     print(f"{'---':3s}  {'----------':12s} {'-----':>5s}  {'------':>6s}  {'----------':>10s}")
     for i, f in enumerate(formats):
-        parts = f["type"].split("_")
-        codec = parts[0] if parts else "?"
-        bitrate = parts[1] if len(parts) >= 2 else "?"
+        bitrate = f"{f['bitrate']}k" if f["bitrate"] > 0 else "?"
         size_str = _fmt_size(f["file_size"])
-        print(f"{i:3d}  {f['type']:12s} {codec:>5s}  {bitrate + 'k':>6s}  {size_str:>10s}")
+        print(f"{i:3d}  {f['type']:12s} {f['codec']:>5s}  {bitrate:>6s}  {size_str:>10s}")
     print()
     print(f"共 {len(formats)} 种格式")
     return 0

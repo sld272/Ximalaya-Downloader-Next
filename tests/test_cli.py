@@ -7,20 +7,63 @@ import pytest
 from xdl.application.usecases import AlbumResult
 from xdl.errors import AuthError
 from xdl.frontends.cli import (_cmd_album, _cmd_refresh_cookies, _cmd_resume,
-                               _cmd_risk_report, build_parser, main)
+                               _cmd_risk_report, _cmd_track, _fmt_size,
+                               build_parser, main)
 from xdl.settings import Settings
 
 
 class FakeApp:
-    def __init__(self, album_result=None, resume_results=None):
+    def __init__(self, album_result=None, resume_results=None, formats_info=None):
         self.album_result = album_result
         self.resume_results = resume_results or []
+        self.formats_info = formats_info
+        self.download_track_calls = 0
 
     def download_album(self, target, quality=None, range_=None, reporter=None):
         return self.album_result
 
     def resume(self, reporter=None):
         return self.resume_results
+
+    def list_formats(self, target):
+        return self.formats_info
+
+    def download_track(self, target, quality=None, reporter=None):
+        self.download_track_calls += 1
+        return "downloaded.mp3"
+
+
+def test_track_list_formats_uses_facade_result_without_downloading(capsys):
+    app = FakeApp(formats_info={
+        "title": "曲目",
+        "track_id": "123",
+        "default_quality": "standard",
+        "formats": [
+            {"type": "M4A_64", "codec": "M4A", "bitrate": 64,
+             "file_size": 2 * 1024 * 1024},
+            {"type": "LOSSLESS", "codec": "LOSSLESS", "bitrate": 0,
+             "file_size": 0},
+        ],
+    })
+    args = build_parser().parse_args(["track", "-F", "123"])
+
+    assert _cmd_track(app, args) == 0
+
+    output = capsys.readouterr().out
+    assert app.download_track_calls == 0
+    assert output.index("M4A_64") < output.index("LOSSLESS")
+    assert "64k" in output
+    assert "未知" in output
+
+
+@pytest.mark.parametrize(("size", "expected"), [
+    (0, "未知"),
+    (512, "512 B"),
+    (1024, "1.0 KB"),
+    (1024 * 1024, "1.0 MB"),
+])
+def test_fmt_size(size, expected):
+    assert _fmt_size(size) == expected
 
 
 def test_album_stop_prints_summary_before_130(capsys):
