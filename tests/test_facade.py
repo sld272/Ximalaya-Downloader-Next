@@ -113,3 +113,23 @@ def test_unknown_source_backend_fails_fast():
 def test_settings_rejects_non_positive_concurrency():
     with pytest.raises(ConfigError, match="并发数"):
         Settings(max_concurrency=0)
+
+
+def test_close_releases_created_task_store():
+    class Store:
+        def __init__(self):
+            self.closed = 0
+
+        def all_tasks(self):
+            return []
+
+        def close(self):
+            self.closed += 1
+
+    store = Store()
+    app = Facade(FakeSource(), FakeSink(), Settings(), store=store)
+
+    app.close()
+    app.close()
+
+    assert store.closed == 1

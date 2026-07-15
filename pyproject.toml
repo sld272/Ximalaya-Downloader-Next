@@ -14,10 +14,12 @@ dependencies = [
     "playwright>=1.40",
     "pycryptodome>=3.15",
     "curl-cffi>=0.7",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "httpx>=0.27"]
 
 [project.scripts]
 xdl = "xdl.frontends.cli:main"

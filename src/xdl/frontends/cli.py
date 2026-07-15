@@ -9,8 +9,11 @@ import argparse
 import sys
 
 from ..application import Facade
+from ..application.diagnostics import (extract_device_identity,
+                                       generate_signatures,
+                                       refresh_login_cookies)
 from ..settings import Settings
-from ..errors import AuthError, XdlError, CancelledByUser
+from ..errors import XdlError, CancelledByUser
 from ..risk import summarize_risk_events
 
 
@@ -149,61 +152,35 @@ def _cmd_inspect(app: Facade, args) -> int:
 
 def _cmd_gen_sign(app: Facade, args) -> int:
     """纯算 xm-sign 冒烟：调用 PySignProvider 生成 xm-sign 并打印。"""
-    from ..adapters import PySignProvider
-
-    signer = PySignProvider(device_info_path=args.device_info)
-    signer.open()
-    try:
-        for i in range(args.repeat):
-            value = signer.sign()
-            print(f"[{i + 1}/{args.repeat}] xm-sign: {value}")
-    finally:
-        signer.close()
+    result = generate_signatures(args.device_info, args.repeat)
+    for i, value in enumerate(result["values"]):
+        print(f"[{i + 1}/{result['repeat']}] xm-sign: {value}")
     return 0
 
 
 def _cmd_extract_device(app: Facade, args) -> int:
     """从 Chrome Profile 提取 du_web_sdk 设备指纹到 JSON 文件。"""
-    from ..adapters.sign import (
-        identity_fingerprint,
-        refresh_device_identity_via_browser,
-        save_device_info,
-        summarize_extract,
-    )
-
     settings = Settings()
-    result = refresh_device_identity_via_browser(
-        profile_dir=args.profile or settings.chrome_profile_dir,
-        chrome_path=settings.chrome_path,
+    result = extract_device_identity(
+        settings,
+        output=args.output,
+        profile=args.profile,
         headless=not args.no_headless,
-        clear_device_state=bool(getattr(args, "refresh", False)),
+        refresh=bool(getattr(args, "refresh", False)),
         fresh_profile=bool(getattr(args, "fresh_profile", False)),
     )
-    out = args.output or settings.device_info_path
-    save_device_info(result.device_info, out)
-    print(f"已保存 {len(result.device_info)} 个字段到 {out}")
-    print(f"identity={identity_fingerprint(result.device_info)}")
-    print(summarize_extract(result))
+    print(f"已保存 {result['field_count']} 个字段到 {result['output_path']}")
+    print(f"identity={result['identity']}")
+    print(result["summary"])
     return 0
 
 
 def _cmd_refresh_cookies(app: Facade, args) -> int:
     """从 Chrome Profile 重新提取登录 Cookie 到 ~/.xdl/cookies.json。"""
-    from ..adapters.sign import (extract_cookies_from_profile, save_cookies,
-                                 is_login_cookie)
     settings = Settings()
-    cookies = extract_cookies_from_profile(
-        profile_dir=settings.chrome_profile_dir,
-        chrome_path=settings.chrome_path,
-        headless=not args.no_headless,
-    )
-    if not is_login_cookie(cookies):
-        raise AuthError(
-            "专用 Chrome Profile 中未发现登录 token（1&_token）；"
-            "未覆盖现有 Cookie 缓存。"
-        )
-    save_cookies(cookies, settings.cookies_cache_path)
-    print(f"已保存 {len(cookies)} 个 Cookie 到 {settings.cookies_cache_path}（已登录）")
+    result = refresh_login_cookies(settings, headless=not args.no_headless)
+    print(f"已保存 {result['cookie_count']} 个 Cookie 到 "
+          f"{result['output_path']}（已登录）")
     return 0
 
 

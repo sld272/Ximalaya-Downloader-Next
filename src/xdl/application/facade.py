@@ -69,6 +69,14 @@ class Facade:
         store = self._task_store()
         return store.all_tasks() if store is not None else []
 
+    def close(self) -> None:
+        """释放惰性创建的任务库，供常驻前端重载配置或关闭进程。"""
+        store, self._store = self._store, None
+        if store is not None:
+            close = getattr(store, "close", None)
+            if close is not None:
+                close()
+
     def list_formats(self, target: str) -> dict:
         """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
 
