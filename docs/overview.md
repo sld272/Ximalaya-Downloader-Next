@@ -1,6 +1,6 @@
 # 项目现状与范围
 
-Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频下载工具，当前提供 CLI 和 Python API。项目仍处于开发阶段，默认使用本地 Python `xm-sign` + HTTP 音源链路。
+Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频下载工具，当前提供 WebUI、CLI 和 Python API。项目仍处于开发阶段，默认使用本地 Python `xm-sign` + HTTP 音源链路。
 
 安装和命令用法见 [README](../README.md)，内部结构见 [架构设计](./architecture.md)。
 
@@ -22,7 +22,7 @@ xdl login
 ### 下载
 
 ```text
-CLI / Python API
+WebUI / CLI / Python API
   → Facade
   → 下载用例与任务引擎
   → HttpSource
@@ -48,6 +48,7 @@ CLI / Python API
 - 本地 Python `xm-sign` 实现及离线契约测试。
 - Chrome/CDP 音源兼容后端。
 - 可选的设备指纹刷新实验：风控后可用浏览器重生 `device_info` 并重试当前曲（默认关闭，不保证有效）。
+- 本机 WebUI：下载任务、登录、任务恢复、音质探测、风控报告、设备/Cookie 诊断和完整运行设置。
 
 ## 明确限制
 
@@ -56,7 +57,7 @@ CLI / Python API
 - 当前自动化测试不会向真实平台发请求，因此只能证明本地算法、载荷和解析契约，不能证明线上持续可用。
 - 历史 CDP 音源在特定环境下出现过验证码以及 `1001` / `3005`；它已降级为兼容路径。
 - 设备指纹刷新实验不能替代登录、内容授权或服务端风控判断，也不保证换身后可继续下载。
-- 当前没有搜索、桌面 GUI、单文件可执行程序或自动更新。
+- 当前没有内容搜索、桌面壳、单文件可执行程序或自动更新。
 
 ## 仓库结构
 
@@ -72,7 +73,7 @@ src/xdl/
 │  ├─ sink_file.py       文件下载与续传
 │  └─ store_sqlite.py    任务持久化
 ├─ config/               平台常量、签名常量和用户数据路径
-├─ frontends/            CLI
+├─ frontends/            CLI、Web API/运行器与静态前端
 ├─ composition.py        装配根
 ├─ risk.py               风控事件与离线汇总
 └─ settings.py           运行设置
@@ -86,4 +87,4 @@ src/xdl/
 2. 把目前保留的高级诊断与无效设备重置实验迁出普通运行路径，经过弃用周期后再删除公开入口。
 3. 消除 `Facade.from_config` 与装配根之间的延迟导入环，并补充静态类型检查。
 4. 为发布增加 CI、覆盖率报告、锁定的依赖测试矩阵和可安装包验证。
-5. 在主下载链路之上建设 WebUI，并再评估搜索、增量同步和桌面封装。
+5. 在现有 WebUI 之上评估内容搜索、增量同步和桌面封装。

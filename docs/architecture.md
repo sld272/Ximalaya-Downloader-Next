@@ -9,7 +9,7 @@
 依赖方向：
 
 ```text
-CLI / Python 调用方
+WebUI / CLI / Python 调用方
           │
           ▼
        Facade
@@ -38,7 +38,9 @@ HTTP/Chrome 音源、签名、解码、文件、SQLite 适配器
 | `composition.py` | 根据 `Settings` 组装对象图 | 下载业务逻辑 |
 | `config` | 平台常量、签名常量、用户数据路径 | 运行期任务状态 |
 
-`Facade` 是公开同步边界。它用 `asyncio.run` 驱动异步 `Source` 生命周期，使 CLI 和普通脚本不需要自行管理事件循环。
+`Facade` 是公开同步边界。它用 `asyncio.run` 驱动异步 `Source` 生命周期，使 Web 运行器、CLI 和普通脚本不需要自行管理事件循环。
+
+WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验和 HTTP 状态，`WebRuntime` 串行化长操作并桥接 `Facade`，静态 HTML/CSS/JavaScript 只消费 JSON API。下载、恢复和诊断共用同一个操作槽，避免多个浏览器/音源会话或 SQLite 写入同时发生；设置仅在空闲时允许更新，并会安全关闭旧 `Facade` 后重新装配。
 
 ## 3. 默认下载链路
 
@@ -146,6 +148,8 @@ device_info
 - SQLite 和文件续传测试。
 - HTTP/Chrome/签名适配器的替身契约测试。
 - CLI 行为测试。
+- WebUI 配置、运行器和 JSON API 契约测试。
+- 桌面与移动视口的真实浏览器交互检查。
 
 默认测试不访问真实平台。测试通过证明本地契约和控制流，不证明当前账号、IP、时间段下的真实服务端可用性。
 

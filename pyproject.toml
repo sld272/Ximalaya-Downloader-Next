@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ximalaya-downloader-next"
 version = "0.1.0"
-description = "喜马拉雅音频下载器（核心库 + CLI）"
+description = "喜马拉雅音频下载器（核心库 + CLI + WebUI）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-or-later" }
@@ -30,7 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "xdl.config" = ["*.json"]
-"xdl.frontends" = ["web_static/*.html", "web_static/*.css", "web_static/*.js"]
+"xdl.frontends" = ["web_static/*.html", "web_static/*.css", "web_static/*.js", "web_static/*.svg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

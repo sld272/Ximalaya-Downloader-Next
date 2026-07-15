@@ -585,6 +585,7 @@ input::placeholder {
   min-width: 0;
   gap: 24px;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .filter-button {
