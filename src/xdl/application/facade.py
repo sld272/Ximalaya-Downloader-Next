@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """门面（库的公开 API，见 docs/architecture.md §11）。
 
-各前端（CLI / 未来 GUI/Web）只依赖这一层。公开方法保持**同步**签名，内部用
+各前端（CLI / 未来 WebUI）只依赖这一层。公开方法保持**同步**签名，内部用
 asyncio 驱动异步解析/并发（`asyncio.run` 收口），前端零改动。
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ class Facade:
                        cancel: threading.Event | None = None) -> AlbumResult:
         """并发批量下载专辑，返回下载汇总。range_ 形如 '1-20' / '5-' / '-10' / '7'。
 
-        `cancel` 供 GUI/TUI 从外部触发优雅停止（等价于 Ctrl-C）。
+        `cancel` 供外部调用方触发优雅停止（等价于 Ctrl-C）。
         """
         return asyncio.run(self._download_album(target, quality, range_, reporter,
                                                 cancel))
@@ -65,7 +65,7 @@ class Facade:
         return asyncio.run(self._resume(reporter, cancel))
 
     def all_tasks(self):
-        """只读：返回任务库中的全部任务（供 TUI/GUI 渲染面板）。无任务库时返回 []。"""
+        """只读：返回任务库中的全部任务（供外部界面渲染）。无任务库时返回 []。"""
         store = self._task_store()
         return store.all_tasks() if store is not None else []
 

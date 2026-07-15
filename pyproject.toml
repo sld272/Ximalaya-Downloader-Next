@@ -18,11 +18,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-tui = ["textual>=0.60"]
 
 [project.scripts]
 xdl = "xdl.frontends.cli:main"
-xdl-tui = "xdl.frontends.tui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

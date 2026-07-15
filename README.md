@@ -128,17 +128,6 @@ xdl --source-backend chrome track <链接或ID>
 
 历史实测表明 CDP 环境可能更容易触发验证码或 `1001` / `3005` 风控。只有在默认 HTTP 后端暂时不兼容且你理解这一限制时才使用它。
 
-## 终端面板
-
-安装可选依赖：
-
-```bash
-pip install -e '.[tui]'
-xdl-tui
-```
-
-终端面板提供链接输入、音质与区间选择、下载/恢复/停止/登录按钮，以及从任务库刷新的逐集状态表。它与 CLI 使用同一个默认 HTTP 后端。
-
 ## 本地数据
 
 默认用户数据位于 `~/.xdl`：
@@ -169,7 +158,7 @@ app.resume()
 ## 开发与验证
 
 ```bash
-pip install -e '.[dev,tui]'
+pip install -e '.[dev]'
 python -m pytest -q
 python -m compileall -q src tests
 ```

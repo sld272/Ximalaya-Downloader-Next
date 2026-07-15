@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """文件命名策略（见 docs/architecture.md §5）。
 
-放在领域层，保证 CLI / 未来 GUI 等各前端命名一致。
+放在领域层，保证 CLI / 未来 WebUI 等各前端命名一致。
 """
 from __future__ import annotations
 

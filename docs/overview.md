@@ -1,6 +1,6 @@
 # 项目现状与范围
 
-Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频下载工具，提供 CLI、Textual 终端面板和 Python API。项目当前处于开发阶段，默认使用本地 Python `xm-sign` + HTTP 音源链路。
+Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频下载工具，当前提供 CLI 和 Python API。项目仍处于开发阶段，默认使用本地 Python `xm-sign` + HTTP 音源链路。
 
 安装和命令用法见 [README](../README.md)，内部结构见 [架构设计](./architecture.md)。
 
@@ -22,7 +22,7 @@ xdl login
 ### 下载
 
 ```text
-CLI / TUI / Python API
+CLI / Python API
   → Facade
   → 下载用例与任务引擎
   → HttpSource
@@ -40,7 +40,7 @@ CLI / TUI / Python API
 - 单曲、整张专辑和区间下载。
 - `high`、`standard`、`low` 音质选择与缺失回退。
 - 文件存在跳过、`.part` 字节级续传、SQLite 任务级恢复。
-- `Ctrl-C` / TUI 停止按钮触发优雅停止。
+- `Ctrl-C` 触发优雅停止。
 - 网络、签名、鉴权、API、风控和存储错误分类。
 - 有界任务调度、失败退避和失败收尾轮。
 - CLI 可通过 `--concurrency N` 调整专辑下载与恢复的异步并发数，默认保持 `1`。
@@ -72,7 +72,7 @@ src/xdl/
 │  ├─ sink_file.py       文件下载与续传
 │  └─ store_sqlite.py    任务持久化
 ├─ config/               平台常量、签名常量和用户数据路径
-├─ frontends/            CLI 与 TUI
+├─ frontends/            CLI
 ├─ composition.py        装配根
 ├─ risk.py               风控事件与离线汇总
 └─ settings.py           运行设置
@@ -86,4 +86,4 @@ src/xdl/
 2. 把目前保留的高级诊断与无效设备重置实验迁出普通运行路径，经过弃用周期后再删除公开入口。
 3. 消除 `Facade.from_config` 与装配根之间的延迟导入环，并补充静态类型检查。
 4. 为发布增加 CI、覆盖率报告、锁定的依赖测试矩阵和可安装包验证。
-5. 再评估搜索、增量同步和桌面 GUI；在主下载链路稳定前不提前扩张功能面。
+5. 在主下载链路之上建设 WebUI，并再评估搜索、增量同步和桌面封装。
