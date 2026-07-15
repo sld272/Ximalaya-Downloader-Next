@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -179,6 +181,21 @@ def _read_collector(page) -> dict:
     )
 
 
+def _remove_temp_profile(path: str, attempts: int = 3) -> bool:
+    """有限重试删除临时 Profile；Windows 短暂文件锁不会留下永久目录。"""
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 >= attempts:
+                return False
+            time.sleep(0.1 * (attempt + 1))
+    return False
+
+
 def extract_device_info(
     profile_dir: str,
     chrome_path: str = "",
@@ -245,53 +262,56 @@ def refresh_device_identity_via_browser(
         work_profile = profile_dir
         os.makedirs(work_profile, exist_ok=True)
 
-    cleared: list[str] = []
-    storage_report: dict | None = None
-    info: Optional[dict] = None
-    cookies: list[dict] = []
+    try:
+        cleared: list[str] = []
+        storage_report: dict | None = None
+        info: Optional[dict] = None
+        cookies: list[dict] = []
 
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            **_launch_kwargs(work_profile, chrome_path, headless)
-        )
-        try:
-            page = ctx.new_page()
-            page.goto(url, wait_until="load", timeout=timeout_ms)
-            page.wait_for_timeout(wait_ms)
-
-            if clear_device_state:
-                cleared = _clear_device_cookies_in_context(ctx, page)
-                try:
-                    storage_report = page.evaluate(_CLEAR_STORAGE_JS)
-                except Exception as e:
-                    storage_report = {"error": str(e)}
-                # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                **_launch_kwargs(work_profile, chrome_path, headless)
+            )
+            try:
+                page = ctx.new_page()
                 page.goto(url, wait_until="load", timeout=timeout_ms)
-                page.wait_for_timeout(post_clear_wait_ms)
+                page.wait_for_timeout(wait_ms)
 
-            info = _read_collector(page)
-            try:
-                cookies = _filter_site_cookies(ctx.cookies())
-            except Exception:
-                cookies = []
-        finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
+                if clear_device_state:
+                    cleared = _clear_device_cookies_in_context(ctx, page)
+                    try:
+                        storage_report = page.evaluate(_CLEAR_STORAGE_JS)
+                    except Exception as e:
+                        storage_report = {"error": str(e)}
+                    # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份
+                    page.goto(url, wait_until="load", timeout=timeout_ms)
+                    page.wait_for_timeout(post_clear_wait_ms)
 
-    if info is None:
-        raise RuntimeError("未能从浏览器读取设备指纹。")
+                info = _read_collector(page)
+                try:
+                    cookies = _filter_site_cookies(ctx.cookies())
+                except Exception:
+                    cookies = []
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
 
-    # 临时 Profile 用完即删目录元数据；不强制 rm tree（Windows 文件锁），调用方不依赖
-    return DeviceExtractResult(
-        device_info=info,
-        cookies=cookies,
-        cleared_cookie_names=cleared,
-        storage_report=storage_report if isinstance(storage_report, dict) else None,
-        profile_dir=work_profile,
-        used_temp_profile=used_temp,
-    )
+        if info is None:
+            raise RuntimeError("未能从浏览器读取设备指纹。")
+
+        return DeviceExtractResult(
+            device_info=info,
+            cookies=cookies,
+            cleared_cookie_names=cleared,
+            storage_report=storage_report if isinstance(storage_report, dict) else None,
+            profile_dir=work_profile,
+            used_temp_profile=used_temp,
+        )
+    finally:
+        if temp_dir and not _remove_temp_profile(temp_dir):
+            print(f"[warn] 临时 Chrome Profile 清理失败: {temp_dir}")
 
 
 def save_device_info(device_info: dict, path: str) -> None:
