@@ -2,6 +2,7 @@
 """设备指纹浏览器提取契约测试（不启动真实浏览器）。"""
 from xdl.adapters.sign.extractor import (
     DeviceExtractResult,
+    _clear_device_cookies_in_context,
     summarize_extract,
 )
 from xdl.adapters.sign.cookies import is_login_cookie
@@ -37,3 +38,77 @@ def test_summarize_extract_marks_temp_profile_and_anonymous():
     text = summarize_extract(result)
     assert "无登录 token" in text
     assert "临时 Profile" in text
+
+
+class _CookieDeleteSession:
+    def __init__(self, context, fail_delete=False):
+        self.context = context
+        self.fail_delete = fail_delete
+        self.enabled = False
+        self.detached = False
+
+    def send(self, method, params=None):
+        if method == "Network.enable":
+            self.enabled = True
+            return
+        assert method == "Network.deleteCookie"
+        if self.fail_delete:
+            raise RuntimeError("delete failed")
+        self.context.cookies_data = [
+            cookie for cookie in self.context.cookies_data
+            if not (
+                cookie["name"] == params["name"]
+                and cookie["domain"] == params["domain"]
+                and cookie["path"] == params["path"]
+            )
+        ]
+
+    def detach(self):
+        self.detached = True
+
+
+class _CookieDeleteContext:
+    def __init__(self, *, fail_delete=False):
+        self.cookies_data = [
+            {
+                "name": "1&_token", "value": "token",
+                "domain": ".ximalaya.com", "path": "/",
+            },
+            {
+                "name": "_xmLog", "value": "device",
+                "domain": ".ximalaya.com", "path": "/",
+            },
+        ]
+        self.session = _CookieDeleteSession(self, fail_delete=fail_delete)
+
+    def cookies(self):
+        return list(self.cookies_data)
+
+    def new_cdp_session(self, _page):
+        return self.session
+
+    def clear_cookies(self):
+        raise AssertionError("不得清空整个 Cookie 容器")
+
+
+def test_clear_device_cookies_uses_targeted_cdp_delete_and_keeps_login():
+    context = _CookieDeleteContext()
+
+    removed = _clear_device_cookies_in_context(context, object())
+
+    assert removed == ["_xmLog"]
+    assert context.session.enabled is True
+    assert context.session.detached is True
+    assert [cookie["name"] for cookie in context.cookies_data] == ["1&_token"]
+
+
+def test_clear_device_cookies_failure_never_clears_login_cookie():
+    context = _CookieDeleteContext(fail_delete=True)
+
+    removed = _clear_device_cookies_in_context(context, object())
+
+    assert removed == []
+    assert context.session.detached is True
+    assert {cookie["name"] for cookie in context.cookies_data} == {
+        "1&_token", "_xmLog",
+    }

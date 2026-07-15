@@ -37,6 +37,20 @@ def strip_device_cookies(cookies: Iterable[dict]) -> list[dict]:
     return [c for c in cookies if not is_device_fingerprint_cookie(c.get("name"))]
 
 
+def device_cookie_delete_targets(cookies: Iterable[dict]) -> list[dict[str, str]]:
+    """生成 CDP ``Network.deleteCookie`` 所需的定向删除参数。"""
+    targets = []
+    for cookie in cookies:
+        if not is_device_fingerprint_cookie(cookie.get("name")):
+            continue
+        targets.append({
+            "name": str(cookie.get("name") or ""),
+            "domain": str(cookie.get("domain") or ""),
+            "path": str(cookie.get("path") or "/"),
+        })
+    return targets
+
+
 def is_login_cookie(cookies: Iterable[dict]) -> bool:
     """只判断登录 token 是否存在；不读 value。"""
     return any(

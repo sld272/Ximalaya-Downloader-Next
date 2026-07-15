@@ -38,22 +38,14 @@ from ..errors import (XdlError, ApiError, AuthError, NetworkError, ConfigError,
                       RiskControlError)
 from ..ports import Decoder
 from ..risk import RiskEventRecorder
+from .sign.cookies import (
+    device_cookie_delete_targets,
+    is_device_fingerprint_cookie as _is_device_fingerprint_cookie,
+)
 
 _AUTH_RETS = {927}   # 无权访问/地区限制等鉴权类
 _LIST_TIMEOUT = 30
 _MAX_PAGES = 2000
-
-
-# 设备指纹 Cookie 名前缀。清除这些、保留登录 Cookie（1&_token / 1&remember_me /
-# web_login 等），等同"在新设备登录同一账号"：下次访问页面时平台 SDK 会为此该 Profile
-# 重新生成 _xmLog/wfp，Hm_lvt_* 首次访问时间戳也一并归零，旧设备上累积的验证码惩罚态
-# 不带入新设备。已通过用户日常浏览器对照确认风控跟设备而非跟账号走。见
-# 详见历史设备 Cookie 差分记录。
-_DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
-
-
-def _is_device_fingerprint_cookie(name) -> bool:
-    return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
 
 
 def _port_alive(port: int) -> bool:
@@ -346,17 +338,12 @@ class ChromeSource:
     async def _delete_device_cookies_via_cdp_async(session, cookies):
         """通过 CDP `Network.deleteCookie` 异步删除指定 cookies，返回被删的名称列表。"""
         removed = []
-        for c in cookies:
-            if _is_device_fingerprint_cookie(c.get("name")):
-                try:
-                    await session.send("Network.deleteCookie", {
-                        "name": c.get("name", ""),
-                        "domain": c.get("domain", ""),
-                        "path": c.get("path", "/"),
-                    })
-                    removed.append(str(c.get("name")))
-                except Exception:
-                    pass
+        for target in device_cookie_delete_targets(cookies):
+            try:
+                await session.send("Network.deleteCookie", target)
+                removed.append(target["name"])
+            except Exception:
+                pass
         return sorted(set(removed))
 
     @classmethod
@@ -368,17 +355,12 @@ class ChromeSource:
         后重加只在内存，`browser.close()` 来不及刷盘导致 `1&_token` 丢失。
         """
         removed = []
-        for c in cookies:
-            if _is_device_fingerprint_cookie(c.get("name")):
-                try:
-                    session.send("Network.deleteCookie", {
-                        "name": c.get("name", ""),
-                        "domain": c.get("domain", ""),
-                        "path": c.get("path", "/"),
-                    })
-                    removed.append(str(c.get("name")))
-                except Exception:
-                    pass
+        for target in device_cookie_delete_targets(cookies):
+            try:
+                session.send("Network.deleteCookie", target)
+                removed.append(target["name"])
+            except Exception:
+                pass
         return sorted(set(removed))
 
     async def _reset_device_cookies(self) -> None:

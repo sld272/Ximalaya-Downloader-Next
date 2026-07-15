@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...config import platform
-from .cookies import is_device_fingerprint_cookie, is_login_cookie
+from .cookies import device_cookie_delete_targets, is_login_cookie
 
 
 # 在 du_web_sdk 加载完成后回读其内部设备信息收集器。兼容 easy-sign 实测过的
@@ -133,46 +133,35 @@ def _filter_site_cookies(cookies: list[dict], domain: str = platform.BASE) -> li
     return out
 
 
-def _clear_device_cookies_in_context(ctx) -> list[str]:
-    """删除设备类 Cookie，保留登录 token 等业务 Cookie。"""
-    removed: list[str] = []
+def _clear_device_cookies_in_context(ctx, page) -> list[str]:
+    """通过 CDP 定向删除设备 Cookie，不改动登录等业务 Cookie。"""
     try:
         all_cookies = ctx.cookies()
     except Exception:
-        return removed
-    keep = []
-    for c in all_cookies:
-        if is_device_fingerprint_cookie(c.get("name")):
-            removed.append(str(c.get("name")))
-        else:
-            keep.append(c)
-    if not removed:
-        return removed
+        return []
+    targets = device_cookie_delete_targets(all_cookies)
+    if not targets:
+        return []
+
+    removed: list[str] = []
+    client = None
     try:
-        ctx.clear_cookies()
-        if keep:
-            # Playwright 需要 url 或 domain/path 才能 add_cookies
-            normalized = []
-            for c in keep:
-                item = {
-                    "name": c.get("name"),
-                    "value": c.get("value"),
-                    "domain": c.get("domain") or ".ximalaya.com",
-                    "path": c.get("path") or "/",
-                }
-                if c.get("expires") is not None:
-                    item["expires"] = c["expires"]
-                if c.get("httpOnly") is not None:
-                    item["httpOnly"] = c["httpOnly"]
-                if c.get("secure") is not None:
-                    item["secure"] = c["secure"]
-                if c.get("sameSite"):
-                    item["sameSite"] = c["sameSite"]
-                normalized.append(item)
-            ctx.add_cookies(normalized)
+        client = ctx.new_cdp_session(page)
+        client.send("Network.enable")
+        for target in targets:
+            try:
+                client.send("Network.deleteCookie", target)
+            except Exception:
+                continue
+            removed.append(target["name"])
     except Exception:
-        # 清理失败时仍继续导航；调用方会从提取结果判断是否拿到新指纹
-        pass
+        return []
+    finally:
+        if client is not None:
+            try:
+                client.detach()
+            except Exception:
+                pass
     return sorted(set(removed))
 
 
@@ -271,7 +260,7 @@ def refresh_device_identity_via_browser(
             page.wait_for_timeout(wait_ms)
 
             if clear_device_state:
-                cleared = _clear_device_cookies_in_context(ctx)
+                cleared = _clear_device_cookies_in_context(ctx, page)
                 try:
                     storage_report = page.evaluate(_CLEAR_STORAGE_JS)
                 except Exception as e:
