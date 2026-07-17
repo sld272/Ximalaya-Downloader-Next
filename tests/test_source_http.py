@@ -242,8 +242,11 @@ def test_cookie_extraction_does_not_navigate_by_default(tmp_path, monkeypatch):
 
     context = _Context()
 
+    launch_kwargs = {}
+
     class _Chromium:
-        def launch_persistent_context(self, **_kwargs):
+        def launch_persistent_context(self, **kwargs):
+            launch_kwargs.update(kwargs)
             return context
 
     class _Playwright:
@@ -263,6 +266,9 @@ def test_cookie_extraction_does_not_navigate_by_default(tmp_path, monkeypatch):
     assert [c["name"] for c in cookies] == ["1&_token"]
     assert context.new_page_called is False
     assert context.closed is True
+    assert set(launch_kwargs["ignore_default_args"]) == {
+        "--password-store=basic", "--use-mock-keychain",
+    }
 
 
 def test_save_cookies_keeps_existing_cache_when_write_fails(tmp_path, monkeypatch):
@@ -431,22 +437,27 @@ def test_get_album_uses_public_endpoint(monkeypatch):
 def test_interactive_login_delegates_to_chrome_fallback(monkeypatch):
     """`xdl login` 在 http 后端下走 ChromeSource 完成登录，再顺带刷一次 Cookie 缓存。"""
     src = _make_http_source(monkeypatch)
+    cookies = [{"name": "1&_token", "value": "tok",
+                "domain": ".ximalaya.com", "path": "/"}]
 
     class _Fallback:
         def __init__(self):
             self.login_called = False
+            self.cookies = list(cookies)
         def interactive_login(self):
             self.login_called = True
             return "/fake/profile"
+        def take_login_cookies(self):
+            result, self.cookies = self.cookies, []
+            return result
     fb = _Fallback()
     src._chrome_fallback = fb
 
-    # 让 HttpSource 在登录后顺带刷新 Cookie：替身掉真实的 Chrome 启动
+    # Cookie 必须来自仍在运行的登录上下文，禁止关闭后再次启动同一 Profile。
     import xdl.adapters.source_http as mod
-    cookies = [{"name": "1&_token", "value": "tok",
-                "domain": ".ximalaya.com", "path": "/"}]
     monkeypatch.setattr(mod, "extract_cookies_from_profile",
-                        lambda *a, **kw: cookies)
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("登录后不应重新启动 Chrome")))
     saved = {}
     monkeypatch.setattr(mod, "save_cookies",
                         lambda c, p: saved.update({"c": c, "p": p}))
@@ -466,13 +477,15 @@ def test_interactive_login_without_token_fails_without_overwriting_cache(monkeyp
     class _Fallback:
         def interactive_login(self):
             return "/fake/profile"
+        def take_login_cookies(self):
+            return [{"name": "_xmLog", "value": "device",
+                     "domain": ".ximalaya.com", "path": "/"}]
 
     src._chrome_fallback = _Fallback()
     import xdl.adapters.source_http as mod
-    anonymous = [{"name": "_xmLog", "value": "device",
-                  "domain": ".ximalaya.com", "path": "/"}]
     monkeypatch.setattr(mod, "extract_cookies_from_profile",
-                        lambda *a, **kw: anonymous)
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("登录后不应重新启动 Chrome")))
     saved = []
     monkeypatch.setattr(mod, "save_cookies",
                         lambda *a, **kw: saved.append(a))

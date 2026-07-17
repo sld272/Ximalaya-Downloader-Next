@@ -48,10 +48,10 @@ HTTP/Chrome 音源、签名、解码、文件、SQLite 适配器
 
 `xdl login` 通过 `ChromeSource.interactive_login()` 打开专用 Chrome。验证分两步：
 
-1. 在活动浏览器上下文中确认存在非空的 `*&_token` Cookie。
+1. 在活动浏览器上下文中确认存在非空的 `*&_token` Cookie，并在关闭前捕获全部目标域 Cookie。
 2. 正常关闭 Chrome 后，以只读方式检查 Cookie 数据库，确认 token 已写入磁盘。
 
-`HttpSource.interactive_login()` 随后从 Profile 导出目标域 Cookie，并只在确认登录 token 存在时原子更新 `~/.xdl/cookies.json`。匿名导出不会覆盖已有的有效缓存。
+`HttpSource.interactive_login()` 直接接收活动登录上下文捕获的 Cookie，并只在确认登录 token 存在时原子更新 `~/.xdl/cookies.json`。登录后不会为了导出 Cookie 再次启动 Profile，避免会话 Cookie 跨重启丢失，也避免 Playwright 的测试凭据存储参数与系统 Chrome 的 Cookie 加密密钥不一致。匿名结果不会覆盖已有的有效缓存。
 
 ### 3.2 `xm-sign`
 
@@ -74,7 +74,7 @@ device_info
 
 ### 3.3 HTTP 音源
 
-`HttpSource.open()` 优先读取新鲜且包含登录 token 的 Cookie 缓存。只有缓存缺失、过期或匿名时才启动专用 Profile 重新导出，因此已有有效缓存时不依赖 Profile 目录仍然存在。
+`HttpSource.open()` 优先读取新鲜且包含登录 token 的 Cookie 缓存。只有缓存缺失、过期或匿名时才启动专用 Profile 重新导出，因此已有有效缓存时不依赖 Profile 目录仍然存在。重新导出会保留系统 Chrome 的密码存储参数，不使用 Playwright 的 mock keychain。
 
 单曲请求流程：
 

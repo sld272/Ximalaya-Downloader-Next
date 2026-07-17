@@ -11,7 +11,7 @@ from .extractor import (
 from .cookies import (
     extract_cookies_from_profile, build_cookie_header, save_cookies,
     load_cached_cookies, is_login_cookie, is_device_fingerprint_cookie,
-    strip_device_cookies,
+    strip_device_cookies, filter_cookies_for_domain,
 )
 
 __all__ = [
@@ -29,4 +29,5 @@ __all__ = [
     "is_login_cookie",
     "is_device_fingerprint_cookie",
     "strip_device_cookies",
+    "filter_cookies_for_domain",
 ]

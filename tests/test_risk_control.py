@@ -490,8 +490,16 @@ def test_login_verification_rejects_dom_only_state(monkeypatch):
 
 def test_login_verification_never_resets_profile_state(monkeypatch):
     """即使显式启用旧诊断开关，登录成功路径也不能修改 Profile。"""
+    cookies = [
+        {"name": "1&_token", "value": "present",
+         "domain": ".ximalaya.com", "path": "/"},
+        {"name": "tgw_l7_route", "value": "route",
+         "domain": "mobile.ximalaya.com", "path": "/"},
+        {"name": "foreign", "value": "ignore",
+         "domain": ".example.com", "path": "/"},
+    ]
     browser = _patch_login_playwright(
-        monkeypatch, [{"name": "1&_token", "value": "present"}],
+        monkeypatch, cookies,
     )
     source = ChromeSource(
         _Decoder(), "chrome", "profile", reset_device_fingerprint=True,
@@ -504,6 +512,10 @@ def test_login_verification_never_resets_profile_state(monkeypatch):
     assert browser.root_cdp_commands == ["Browser.close"]
     assert browser.closed is False
     assert reset_calls == []
+    assert [c["name"] for c in source.take_login_cookies()] == [
+        "1&_token", "tgw_l7_route",
+    ]
+    assert source.take_login_cookies() == []
 
 
 def test_device_fingerprint_reset_is_disabled_by_default():

@@ -111,8 +111,8 @@ class HttpSource:
         `interactive_login` /
         `inspect_storage` 这两类**与音源后端无关**的命令——它们本来就和"如何获取
         播放地址"无关（登录只是把会话落到 Chrome Profile；inspect 只是列设备
-        标识 key）。`xdl login` 走它把登录态写进 ~/.xdl/chrome-profile，
-        登录成功后会自动从该 Profile 导出 Cookie 给 HttpSource 使用。
+        标识 key）。`xdl login` 走它把登录态写进 ~/.xdl/chrome-profile，并在关闭
+        Chrome 前捕获目标域 Cookie 给 HttpSource 使用。
 
         实验开关（默认关闭）：命中已识别风控时，通过真实浏览器重生设备指纹并
         重试当前曲。不保证服务端接受，也不是默认抗风控策略。
@@ -538,14 +538,16 @@ class HttpSource:
                 "未配置 chrome_fallback；无法在纯 HTTP 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
         path = self._chrome_fallback.interactive_login()
-        # 登录成功后同步把 Cookie 刷到缓存；没有 token 就视为失败，绝不覆盖旧缓存。
-        try:
-            cookies = extract_cookies_from_profile(
-                self._profile_dir, self._chrome_path,
-                headless=self._chrome_headless,
+        # Cookie 已在登录 Chrome 仍存活时捕获。这里绝不能为导出而重启 Profile：
+        # Playwright 的测试用 Keychain 参数与系统 Chrome 不同，会在 macOS 上清掉
+        # 无法解密的 Cookie；会话 Cookie 即使加密兼容也未必能跨重启恢复。
+        take_cookies = getattr(self._chrome_fallback, "take_login_cookies", None)
+        if not callable(take_cookies):
+            raise ConfigError(
+                "chrome_fallback 未提供登录 Cookie 捕获结果；无法安全保存登录态。"
             )
-        except Exception as e:
-            raise AuthError(f"登录后导出 Cookie 失败: {e}") from e
+        cookies = take_cookies()
+        # 没有 token 就视为失败，绝不覆盖旧缓存。
         self._save_authenticated_cookies_sync(cookies)
         self._cookies = cookies
         self._cookie_header = build_cookie_header(cookies)
