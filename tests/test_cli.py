@@ -172,6 +172,9 @@ def test_experiment_rotate_defaults_off():
     assert settings.experiment_rotate_device_on_risk is False
     assert settings.experiment_strip_device_cookies is True
     assert settings.experiment_max_device_rotations == 0
+    assert settings.experiment_browser_fresh_profile is True
+    assert settings.experiment_rotate_headless is False
+    assert settings.experiment_risk_cooldown_seconds == 15.0
 
 
 def test_main_enables_experiment_rotate_flag(monkeypatch):
@@ -192,10 +195,12 @@ def test_main_enables_experiment_rotate_flag(monkeypatch):
     monkeypatch.setattr(cli.Facade, "from_config", staticmethod(fake_from_config))
     code = cli.main([
         "--experiment-rotate-device",
+        "--experiment-risk-cooldown", "120",
         "album", "123", "--range", "1-2",
     ])
     assert code == 0
     assert captured["settings"].experiment_rotate_device_on_risk is True
+    assert captured["settings"].experiment_risk_cooldown_seconds == 120.0
 
 
 

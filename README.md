@@ -39,7 +39,7 @@ xdl web
 xdl login
 ```
 
-浏览器打开后完成登录，并按终端提示确认。程序会验证登录态确实已写入专用 Profile，然后自动导出下载所需的 Cookie；成功后无需再执行刷新命令。
+浏览器打开后完成登录，并按终端提示确认。程序会在活动登录上下文中捕获 Cookie、验证登录态确实已写入专用 Profile，再保存下载所需的 Cookie；不会为了导出而重启 Chrome，成功后无需再执行刷新命令。
 
 随后直接下载：
 
@@ -103,32 +103,18 @@ xdl gen-sign -n 3
 
 该命令仍会访问设备上报服务，因此不是完全离线操作。
 
-### 设备指纹刷新（实验功能）
+### 设备信息（可选）
 
-默认关闭。开启后，在识别到风控时会尝试用浏览器刷新设备指纹并重试当前曲目：
+日常下载一般不需要手动维护设备信息；缺失时使用包内模板。需要自检或更新时：
 
 ```bash
-# 全局选项写在子命令前
-xdl --experiment-rotate-device album <链接或ID>
-xdl --experiment-rotate-device --concurrency 1 album <ID> --range 1-8
-
-# 手动提取 / 刷新指纹
-xdl extract-device --refresh
-xdl extract-device --fresh-profile -o %USERPROFILE%\.xdl\device-info-fresh.json
-xdl gen-sign --device-info %USERPROFILE%\.xdl\device-info.json
+xdl extract-device                 # 从专用 Profile 采集到 ~/.xdl/device-info.json
+xdl extract-device -o <路径>       # 指定输出路径
+xdl gen-sign                       # 检查本地签名链路
+xdl gen-sign --device-info <路径>  # 使用指定设备信息文件
 ```
 
-| 写法 | 说明 |
-|---|---|
-| `--experiment-rotate-device` | 全局开关；写在子命令前，命中风控后刷新指纹并重试当前曲 |
-| `extract-device --refresh` | 清设备 Cookie/storage 后，让 `du_web_sdk` 重生并采集 |
-| `extract-device --fresh-profile` | 用临时全新 Profile 采集（通常无登录态） |
-| `extract-device -o <路径>` | 指定指纹输出路径（默认 `~/.xdl/device-info.json`） |
-| `gen-sign --device-info <路径>` | 用指定指纹文件冒烟生成 `xm-sign` |
-
-换身后首次请求成功，本会话后续再遇风控仍可刷新，并且只有此时才会原子写回新指纹；若换身后首次仍风控，本会话停用且保留磁盘上的旧指纹。更细的行为（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置，例如 `experiment_max_device_rotations=0` 表示不限次数。
-
-该能力**不保证**恢复可用，也不构成对平台访问控制的绕过。
+另有默认关闭的实验开关 `--experiment-rotate-device`：在识别到风控后可尝试刷新设备信息并重试当前曲。**不保证**恢复可用，也不构成对平台访问控制的绕过；细项通过 `Settings` 配置。
 
 ### Chrome 兼容后端
 
@@ -138,7 +124,7 @@ xdl gen-sign --device-info %USERPROFILE%\.xdl\device-info.json
 xdl --source-backend chrome track <链接或ID>
 ```
 
-历史实测表明 CDP 环境可能更容易触发验证码或 `1001` / `3005` 风控。只有在默认 HTTP 后端暂时不兼容且你理解这一限制时才使用它。
+该路径主要用于登录与兼容诊断。只有在默认 HTTP 后端暂时不兼容且你理解其限制时才使用它。
 
 ## 本地数据
 
@@ -150,7 +136,7 @@ xdl --source-backend chrome track <链接或ID>
 | `cookies.json` | HTTP 后端使用的登录 Cookie 缓存，属于敏感数据 |
 | `device-info.json` | 可选设备信息；不存在时使用包内模板 |
 | `tasks.db` | 下载任务、进度和恢复状态 |
-| `risk-events.jsonl` | 最小化风控观测，不含 Cookie 或播放 URL |
+| `risk-events.jsonl` | 最小化请求结果观测（供 `risk-report`），不含 Cookie 或播放 URL |
 
 可通过环境变量 `XDL_HOME` 修改用户数据根目录。
 

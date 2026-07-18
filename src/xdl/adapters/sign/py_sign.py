@@ -112,6 +112,95 @@ def _refresh_zf5(device_info: dict) -> dict:
     return info
 
 
+def _atbash(text: str) -> str:
+    """du_web_sdk 对 UA 做字母表反转（A↔Z）后再 Base64 写入 ew1.Le3。"""
+    out: list[str] = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr(25 - (ord(ch) - 65) + 65))
+        elif "a" <= ch <= "z":
+            out.append(chr(25 - (ord(ch) - 97) + 97))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _encode_le3(user_agent: str) -> str:
+    """与 du_web_sdk 一致：Base64(atbash(UA))，无填充 '='。"""
+    return base64.b64encode(_atbash(user_agent).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def user_agent_from_device_info(device_info: dict | None) -> str | None:
+    """从 device_info.ew1 还原完整 User-Agent；无法还原时返回 None。"""
+    if not isinstance(device_info, dict):
+        return None
+    ew1 = device_info.get("ew1")
+    if not isinstance(ew1, dict):
+        return None
+    yv2 = str(ew1.get("yV2") or "")
+    if not yv2:
+        return None
+    if yv2.startswith("Mozilla/") or yv2.startswith("Mozilla "):
+        return yv2
+    wg7 = str(ew1.get("Wg7") or "Mozilla")
+    return f"{wg7}/{yv2}"
+
+
+def sanitize_device_info(device_info: dict) -> tuple[dict, bool]:
+    """去掉 device_info 中最明显的无头自动化 UA 痕迹。
+
+    headless 提取的指纹常把 `navigator.userAgent` 写成 `HeadlessChrome/…`。
+    若原样上报 hdaa，服务端会把该设备标成自动化环境；换身若仍走 headless
+    采集，还会把同一痕迹写回去。这里只改写 UA 相关字段，不碰设备 ID。
+
+    Returns:
+        (sanitized_copy, changed)
+    """
+    if not isinstance(device_info, dict) or not device_info:
+        return device_info, False
+    info = copy.deepcopy(device_info)
+    ew1 = info.get("ew1")
+    if not isinstance(ew1, dict):
+        return info, False
+
+    yv2 = str(ew1.get("yV2") or "")
+    le3 = str(ew1.get("Le3") or "")
+    changed = False
+
+    if "HeadlessChrome" in yv2:
+        ew1["yV2"] = yv2.replace("HeadlessChrome", "Chrome")
+        changed = True
+    elif "Headless" in yv2:
+        # 兜底：其它 Headless* 令牌
+        ew1["yV2"] = yv2.replace("Headless", "")
+        changed = True
+
+    ua = user_agent_from_device_info({"ew1": ew1})
+    if ua:
+        # Le3 可能仍编码着旧的 Headless UA（即便 yV2 已人工改过）
+        new_le3 = _encode_le3(ua)
+        needs_le3 = False
+        if le3 != new_le3:
+            if changed:
+                needs_le3 = True
+            elif le3:
+                try:
+                    pad = "=" * ((4 - len(le3) % 4) % 4)
+                    decoded = _atbash(
+                        base64.b64decode(le3 + pad).decode("utf-8", "replace")
+                    )
+                    needs_le3 = "Headless" in decoded
+                except Exception:
+                    needs_le3 = False
+        if needs_le3:
+            ew1["Le3"] = new_le3
+            changed = True
+
+    if changed:
+        info["ew1"] = ew1
+    return info, changed
+
+
 class PySignProvider:
     """纯算 xm-sign 生成器：device_info → 上报 → cadd&&sid。
 
@@ -181,6 +270,7 @@ class PySignProvider:
         - 传入 dict：使用该深拷贝，不写回磁盘。
 
         供 HTTP 路径「换身」实验调用；默认下载链路不会自动调用。
+        传入的 dict 会先做 HeadlessChrome UA 消毒，避免换身把无头痕迹写回。
         """
         with self._lock:
             if device_info is None:
@@ -188,7 +278,13 @@ class PySignProvider:
             else:
                 if not isinstance(device_info, dict) or not device_info:
                     raise SignError("reload 需要非空 device_info dict")
-                self._device_info = copy.deepcopy(device_info)
+                cleaned, changed = sanitize_device_info(device_info)
+                if changed:
+                    print(
+                        "[warn] 换身得到的 device_info 含 HeadlessChrome，"
+                        "已在内存中改写为 Chrome 后再 reload。"
+                    )
+                self._device_info = cleaned
 
     # ---- 内部 ----
     def _load_device_info(self) -> dict:
@@ -202,7 +298,26 @@ class PySignProvider:
                 print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
         if info is None:
             info = sign_conf.load_default_device_info()
-        return info
+        cleaned, changed = sanitize_device_info(info)
+        if changed:
+            print(
+                "[warn] device_info 含 HeadlessChrome 自动化 UA；"
+                "已在上报前改写为 Chrome。"
+                "建议用有头浏览器重新 `xdl extract-device --no-headless`。"
+            )
+        return cleaned
+
+    def _report_user_agent(self) -> str:
+        """hdaa 请求 UA：优先构造参数，否则与 device_info 对齐，最后回退模板。"""
+        if self._user_agent:
+            return self._user_agent
+        from_device = user_agent_from_device_info(self._device_info)
+        if from_device and "Headless" not in from_device:
+            return from_device
+        return (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        )
 
     def _fresh_report(self) -> tuple[str, str]:
         """单次 hdaa 上报：刷新 Zf5 → 上报 → 解析 (cadd, sid)。"""
@@ -216,10 +331,7 @@ class PySignProvider:
         url = self._report_url.format(uuid=str(uuid.uuid4()))
         headers = {
             "Content-Type": "application/octet-stream",
-            "User-Agent": self._user_agent or (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": self._report_user_agent(),
             "Host": sign_conf.HDAA_HOST,
         }
         try:

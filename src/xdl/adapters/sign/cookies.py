@@ -22,14 +22,30 @@ from ...config import platform
 
 _LOGIN_COOKIE_SUFFIX = "&_token"
 
-# 与 ChromeSource 一致：设备标识 Cookie 前缀。剥离它们可在 HTTP 实验中
-# 尝试与新的 device_info 对齐（保留登录 token）。
-_DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
+# 设备/反垃圾/埋点类 Cookie。剥离它们可在 HTTP 路径上让身份主要跟
+# xm-sign 的 device_info 走，避免 Cookie 碎片把“新身”粘回旧惩罚态。
+# 前缀匹配：历史设备 ID、百度统计、SDK 混淆键（assva*/cmci*/vmce*/pmck*）。
+_DEVICE_COOKIE_PREFIXES = (
+    "_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_",
+    "assva", "cmci", "vmce", "pmck",
+)
+# 精确名：localStorage 镜像到 Cookie 的设备指纹、统计账户镜像等。
+_DEVICE_COOKIE_EXACT = frozenset({
+    "crystal",
+    "HMACCOUNT",
+    "cid",
+    "_antispam_",
+})
 
 
 def is_device_fingerprint_cookie(name) -> bool:
     """判断 Cookie 名是否为设备/统计类指纹载体（不读 value）。"""
-    return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
+    text = str(name or "")
+    if not text:
+        return False
+    if text in _DEVICE_COOKIE_EXACT:
+        return True
+    return text.startswith(_DEVICE_COOKIE_PREFIXES)
 
 
 def strip_device_cookies(cookies: Iterable[dict]) -> list[dict]:
@@ -57,6 +73,26 @@ def is_login_cookie(cookies: Iterable[dict]) -> bool:
         str(c.get("name") or "").endswith(_LOGIN_COOKIE_SUFFIX) and bool(c.get("value"))
         for c in cookies
     )
+
+
+def is_login_related_cookie(name) -> bool:
+    """是否为应跨设备保留的登录相关 Cookie（不含设备指纹）。"""
+    text = str(name or "")
+    if not text:
+        return False
+    if text.endswith(_LOGIN_COOKIE_SUFFIX):
+        return True
+    if text.endswith("&remember_me"):
+        return True
+    return text in {"web_login"}
+
+
+def login_cookies_only(cookies: Iterable[dict]) -> list[dict]:
+    """只保留登录相关 Cookie，供全新 Profile 播种登录态。"""
+    return [
+        dict(c) for c in cookies
+        if is_login_related_cookie(c.get("name")) and c.get("value") is not None
+    ]
 
 
 def extract_cookies_from_profile(
@@ -91,6 +127,10 @@ def extract_cookies_from_profile(
         viewport={"width": 1440, "height": 900},
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
+        # 登录 Profile 由系统 Chrome 直接启动并使用系统凭据存储加密 Cookie。
+        # Playwright 默认追加的这两个参数会改用测试用密码存储；在 macOS 上尤其会让
+        # Chrome 无法解密刚写入的 Keychain Cookie，并在启动时删除对应数据库行。
+        ignore_default_args=["--password-store=basic", "--use-mock-keychain"],
         args=[
             "--no-first-run",
             "--no-default-browser-check",
@@ -120,8 +160,7 @@ def extract_cookies_from_profile(
                     pass
             # 读全部域的 Cookie，再按目标 host 过滤；避免错过跨子域的登录 Cookie
             all_cookies = ctx.cookies()
-            cookies = [c for c in all_cookies
-                       if _cookie_matches(c, cookie_domain)]
+            cookies = filter_cookies_for_domain(all_cookies, cookie_domain)
         finally:
             try:
                 ctx.close()
@@ -133,13 +172,21 @@ def extract_cookies_from_profile(
 
 def _cookie_matches(cookie: dict, domain: str) -> bool:
     """简单判断 cookie 是否属于 ximalaya.com（含子域）。"""
-    name = str(cookie.get("domain") or "")
+    cookie_host = str(cookie.get("domain") or "").lstrip(".").lower()
     host = domain.replace("https://", "").replace("http://", "")
     # 去掉 host 里的端口和路径
-    host = host.split("/", 1)[0]
-    if name.startswith("."):
-        return host == name[1:] or host.endswith(name)
-    return host == name
+    host = host.split("/", 1)[0].split(":", 1)[0].lower()
+    # 平台入口是 www.ximalaya.com，但导出需要覆盖 mobile.ximalaya.com 等兄弟
+    # 子域；把常见 www 入口归一到站点根域后再做点边界匹配。
+    site_host = host[4:] if host.startswith("www.") else host
+    return cookie_host == site_host or cookie_host.endswith("." + site_host)
+
+
+def filter_cookies_for_domain(
+    cookies: Iterable[dict], domain: str = platform.BASE,
+) -> list[dict]:
+    """筛出目标站点及其子域 Cookie，同时保留浏览器返回的完整字段。"""
+    return [c for c in cookies if _cookie_matches(c, domain)]
 
 
 def build_cookie_header(cookies: Iterable[dict]) -> str:

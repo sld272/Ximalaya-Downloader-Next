@@ -73,12 +73,15 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
                       experiment_strip_device_cookies=True,
                       experiment_max_rotations=0,
                       experiment_persist_device_info=False,
+                      experiment_risk_cooldown_seconds=0.0,
                       response_bodies=None):
     """构造一个已经 ready 的 HttpSource（cookies 已加载、跳过浏览器提取）。"""
     cookies = cookies if cookies is not None else [
         {"name": "1&_token", "value": "tok", "domain": ".ximalaya.com",
          "path": "/"},
         {"name": "_xmLog", "value": "dev", "domain": ".ximalaya.com",
+         "path": "/"},
+        {"name": "crystal", "value": "fp", "domain": ".ximalaya.com",
          "path": "/"},
     ]
     cached_cookies = cookies if cached_cookies is None else cached_cookies
@@ -106,6 +109,7 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         experiment_strip_device_cookies=experiment_strip_device_cookies,
         experiment_max_rotations=experiment_max_rotations,
         experiment_persist_device_info=experiment_persist_device_info,
+        experiment_risk_cooldown_seconds=experiment_risk_cooldown_seconds,
         device_info_path="/fake/device-info.json",
     )
 
@@ -161,7 +165,10 @@ def _run_async(coro):
 def test_http_source_open_loads_cookies_and_auth_state(monkeypatch):
     src = _make_http_source(monkeypatch)
     _run_async(src.open())
-    assert src._cookie_header == "1&_token=tok; _xmLog=dev"
+    # 默认剥离设备 Cookie；登录 token 保留
+    assert src._cookie_header == "1&_token=tok"
+    assert "_xmLog" not in src._cookie_header
+    assert "crystal" not in src._cookie_header
     assert src._authenticated is True
 
 
@@ -242,8 +249,11 @@ def test_cookie_extraction_does_not_navigate_by_default(tmp_path, monkeypatch):
 
     context = _Context()
 
+    launch_kwargs = {}
+
     class _Chromium:
-        def launch_persistent_context(self, **_kwargs):
+        def launch_persistent_context(self, **kwargs):
+            launch_kwargs.update(kwargs)
             return context
 
     class _Playwright:
@@ -263,6 +273,9 @@ def test_cookie_extraction_does_not_navigate_by_default(tmp_path, monkeypatch):
     assert [c["name"] for c in cookies] == ["1&_token"]
     assert context.new_page_called is False
     assert context.closed is True
+    assert set(launch_kwargs["ignore_default_args"]) == {
+        "--password-store=basic", "--use-mock-keychain",
+    }
 
 
 def test_save_cookies_keeps_existing_cache_when_write_fails(tmp_path, monkeypatch):
@@ -331,9 +344,11 @@ def test_http_source_get_track_anonymous_1001_is_api_error_not_risk(monkeypatch)
     仍是真风控、匿名态 1001 退到 ApiError，这条边界必须保住。
     """
     body = {"ret": 1001, "msg": "系统繁忙，请稍后再试!"}
-    # 匿名 Cookie：没有 1&_token
-    cookies = [{"name": "_xmLog", "value": "dev",
-                "domain": ".ximalaya.com", "path": "/"}]
+    # 匿名 Cookie：没有 1&_token；保留非设备 Cookie，剥离后仍可发请求
+    cookies = [
+        {"name": "_xmLog", "value": "dev", "domain": ".ximalaya.com", "path": "/"},
+        {"name": "impl", "value": "www", "domain": ".ximalaya.com", "path": "/"},
+    ]
     src = _make_http_source(monkeypatch, base_info_body=body, cookies=cookies)
     _run_async(src.open())
     assert src._authenticated is False
@@ -395,8 +410,10 @@ def test_http_source_get_track_no_login_cookie_warns_but_proceeds(monkeypatch):
     body = {"ret": 200, "data": {"trackInfo": {
         "title": "免费", "playUrlList": [{"type": "MP3_64", "url": "enc"}]
     }}}
-    cookies = [{"name": "_xmLog", "value": "dev",
-                "domain": ".ximalaya.com", "path": "/"}]
+    cookies = [
+        {"name": "_xmLog", "value": "dev", "domain": ".ximalaya.com", "path": "/"},
+        {"name": "impl", "value": "www", "domain": ".ximalaya.com", "path": "/"},
+    ]
     src = _make_http_source(monkeypatch, base_info_body=body, cookies=cookies)
     _run_async(src.open())
     assert src._authenticated is False
@@ -431,22 +448,27 @@ def test_get_album_uses_public_endpoint(monkeypatch):
 def test_interactive_login_delegates_to_chrome_fallback(monkeypatch):
     """`xdl login` 在 http 后端下走 ChromeSource 完成登录，再顺带刷一次 Cookie 缓存。"""
     src = _make_http_source(monkeypatch)
+    cookies = [{"name": "1&_token", "value": "tok",
+                "domain": ".ximalaya.com", "path": "/"}]
 
     class _Fallback:
         def __init__(self):
             self.login_called = False
+            self.cookies = list(cookies)
         def interactive_login(self):
             self.login_called = True
             return "/fake/profile"
+        def take_login_cookies(self):
+            result, self.cookies = self.cookies, []
+            return result
     fb = _Fallback()
     src._chrome_fallback = fb
 
-    # 让 HttpSource 在登录后顺带刷新 Cookie：替身掉真实的 Chrome 启动
+    # Cookie 必须来自仍在运行的登录上下文，禁止关闭后再次启动同一 Profile。
     import xdl.adapters.source_http as mod
-    cookies = [{"name": "1&_token", "value": "tok",
-                "domain": ".ximalaya.com", "path": "/"}]
     monkeypatch.setattr(mod, "extract_cookies_from_profile",
-                        lambda *a, **kw: cookies)
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("登录后不应重新启动 Chrome")))
     saved = {}
     monkeypatch.setattr(mod, "save_cookies",
                         lambda c, p: saved.update({"c": c, "p": p}))
@@ -466,13 +488,15 @@ def test_interactive_login_without_token_fails_without_overwriting_cache(monkeyp
     class _Fallback:
         def interactive_login(self):
             return "/fake/profile"
+        def take_login_cookies(self):
+            return [{"name": "_xmLog", "value": "device",
+                     "domain": ".ximalaya.com", "path": "/"}]
 
     src._chrome_fallback = _Fallback()
     import xdl.adapters.source_http as mod
-    anonymous = [{"name": "_xmLog", "value": "device",
-                  "domain": ".ximalaya.com", "path": "/"}]
     monkeypatch.setattr(mod, "extract_cookies_from_profile",
-                        lambda *a, **kw: anonymous)
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("登录后不应重新启动 Chrome")))
     saved = []
     monkeypatch.setattr(mod, "save_cookies",
                         lambda *a, **kw: saved.append(a))
@@ -545,7 +569,9 @@ def test_rotate_device_identity_reloads_from_browser(monkeypatch):
         experiment_strip_device_cookies=True,
     )
     _run_async(src.open())
-    assert "_xmLog=dev" in src._cookie_header
+    # open 时已剥离设备 Cookie
+    assert "_xmLog" not in src._cookie_header
+    assert "1&_token=tok" in src._cookie_header
 
     extracted = {
         "HW5": "hw-from-browser",
@@ -560,6 +586,7 @@ def test_rotate_device_identity_reloads_from_browser(monkeypatch):
     browser_cookies = [
         {"name": "1&_token", "value": "tok", "domain": ".ximalaya.com", "path": "/"},
         {"name": "_xmLog", "value": "new-dev", "domain": ".ximalaya.com", "path": "/"},
+        {"name": "crystal", "value": "new-fp", "domain": ".ximalaya.com", "path": "/"},
         {"name": "other", "value": "1", "domain": ".ximalaya.com", "path": "/"},
     ]
 
@@ -581,20 +608,23 @@ def test_rotate_device_identity_reloads_from_browser(monkeypatch):
     assert fp
     assert src._sign.reload_count == 1
     assert src._sign.device_info()["HW5"] == "hw-from-browser"
-    # strip 后浏览器导出的 _xmLog 不应进入 HTTP Cookie 头
+    # strip 后浏览器导出的设备 Cookie 不应进入 HTTP Cookie 头
     assert "_xmLog" not in src._cookie_header
+    assert "crystal" not in src._cookie_header
     assert "1&_token=tok" in src._cookie_header
+    assert "other=1" in src._cookie_header
     assert src._device_fingerprint_was_reset is True
     assert src._device_rotations == 1
 
 
-def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b"):
+def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b", capture: dict | None = None):
     from xdl.adapters.sign.extractor import DeviceExtractResult
     import xdl.adapters.source_http as mod
 
-    monkeypatch.setattr(
-        mod, "refresh_device_identity_via_browser",
-        lambda **_kw: DeviceExtractResult(
+    def _fake(**kwargs):
+        if capture is not None:
+            capture.update(kwargs)
+        return DeviceExtractResult(
             device_info={
                 "HW5": hw, "GJ2": "gj-b", "DP5": "dp-b", "adi": "a",
                 "acd": "c", "ew1": {"yV2": "ua"}, "fd2": {"xz7": "u"}, "Zf5": 1,
@@ -602,8 +632,10 @@ def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b"):
             cookies=[{"name": "1&_token", "value": "tok",
                       "domain": ".ximalaya.com", "path": "/"}],
             cleared_cookie_names=["_xmLog"],
-        ),
-    )
+            used_temp_profile=bool(kwargs.get("fresh_profile")),
+        )
+
+    monkeypatch.setattr(mod, "refresh_device_identity_via_browser", _fake)
 
 
 def test_rotated_device_info_is_persisted_only_after_probe_success(monkeypatch):
@@ -812,3 +844,106 @@ def test_experiment_max_rotations_hard_cap(monkeypatch):
     with pytest.raises(RiskControlError):
         _run_async(src.get_track("2"))
     assert src._device_rotations == 1
+
+
+def test_risk_rotate_waits_cooldown(monkeypatch):
+    """风控后换身前先冷却，再探针。"""
+    import xdl.adapters.source_http as mod
+
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "恢复曲",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, ok],
+        experiment_rotate_device_on_risk=True,
+        experiment_risk_cooldown_seconds=12.0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(float(seconds))
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    _run_async(src.open())
+    track = _run_async(src.get_track("1"))
+    assert track.title == "恢复曲"
+    assert sleeps == [12.0]
+    assert src._device_rotations == 1
+
+
+def test_open_keeps_device_cookies_when_strip_disabled(monkeypatch):
+    src = _make_http_source(
+        monkeypatch,
+        experiment_strip_device_cookies=False,
+    )
+    _run_async(src.open())
+    assert "1&_token=tok" in src._cookie_header
+    assert "_xmLog=dev" in src._cookie_header
+    assert "crystal=fp" in src._cookie_header
+
+
+def test_strip_device_cookies_covers_expanded_identity_names():
+    from xdl.adapters.sign.cookies import strip_device_cookies
+
+    cookies = [
+        {"name": "1&_token", "value": "tok"},
+        {"name": "web_login", "value": "1"},
+        {"name": "crystal", "value": "x"},
+        {"name": "assva5", "value": "x"},
+        {"name": "cmci9xde", "value": "x"},
+        {"name": "vmce9xdq", "value": "x"},
+        {"name": "pmck9xge", "value": "x"},
+        {"name": "HMACCOUNT", "value": "x"},
+        {"name": "cid", "value": "x"},
+        {"name": "_antispam_", "value": "x"},
+        {"name": "_xmLog", "value": "x"},
+        {"name": "HWWAFSESID", "value": "waf"},
+    ]
+    kept = {c["name"] for c in strip_device_cookies(cookies)}
+    assert kept == {"1&_token", "web_login", "HWWAFSESID"}
+
+
+def test_login_cookies_only_keeps_auth_not_device():
+    from xdl.adapters.sign.cookies import login_cookies_only
+
+    cookies = [
+        {"name": "1&_token", "value": "tok"},
+        {"name": "1&remember_me", "value": "1"},
+        {"name": "web_login", "value": "1"},
+        {"name": "crystal", "value": "x"},
+        {"name": "_xmLog", "value": "x"},
+        {"name": "impl", "value": "www"},
+    ]
+    names = [c["name"] for c in login_cookies_only(cookies)]
+    assert names == ["1&_token", "1&remember_me", "web_login"]
+
+
+def test_realistic_rotate_uses_fresh_profile_seed_and_headed(monkeypatch):
+    """更真实换身：临时 Profile + 播种登录 Cookie + 默认有头。"""
+    capture: dict = {}
+    src = _make_http_source(
+        monkeypatch,
+        experiment_strip_device_cookies=True,
+    )
+    # 默认设置应偏向真实换身
+    src._experiment_fresh_profile = True
+    src._experiment_rotate_headless = False
+    src._chrome_headless = True  # 即便下载默认无头，换身也应有头
+    _patch_browser_rotate(monkeypatch, capture=capture)
+    _run_async(src.open())
+    _run_async(src.rotate_device_identity())
+
+    assert capture.get("fresh_profile") is True
+    assert capture.get("headless") is False
+    seeds = capture.get("seed_cookies") or []
+    assert any(c.get("name") == "1&_token" for c in seeds)
+    # 播种不应带设备 Cookie
+    assert not any(str(c.get("name", "")).startswith("_xmLog") for c in seeds)
+    assert not any(c.get("name") == "crystal" for c in seeds)

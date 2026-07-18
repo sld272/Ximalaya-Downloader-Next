@@ -40,6 +40,7 @@ from ..ports import Decoder
 from ..risk import RiskEventRecorder
 from .sign.cookies import (
     device_cookie_delete_targets,
+    filter_cookies_for_domain,
     is_device_fingerprint_cookie as _is_device_fingerprint_cookie,
 )
 
@@ -282,6 +283,9 @@ class ChromeSource:
         self._pw = None
         self._browser = None
         self._ctx = None
+        # `xdl login` 成功时，在关闭 Chrome 前捕获目标域 Cookie；HttpSource 随后
+        # 取走并写入 JSON 缓存，避免为导出而用不同凭据存储参数重启同一 Profile。
+        self._login_cookies: list[dict] = []
 
     # ---- 会话生命周期（Source 端口） ----
     async def open(self) -> None:
@@ -633,6 +637,7 @@ class ChromeSource:
 
     # ---- 适配器特有：交互式登录（同步，一次性） ----
     def interactive_login(self) -> str:
+        self._login_cookies = []
         self._require_chrome()
         os.makedirs(self._profile_dir, exist_ok=True)
         if _port_alive(self._port):
@@ -673,12 +678,19 @@ class ChromeSource:
             else:
                 self._terminate_process(proc)
         if not closed_cleanly:
+            self._login_cookies = []
             raise NetworkError("Chrome 未能正常退出，无法确认登录态是否已持久化。")
         if not _has_persisted_login_cookie(self._profile_dir):
+            self._login_cookies = []
             raise AuthError(
                 "登录 token 未持久化到专用 Chrome Profile；请重新登录后再试。"
             )
         return self._profile_dir
+
+    def take_login_cookies(self) -> list[dict]:
+        """取走本次交互登录在活动上下文中捕获的 Cookie，并清除内存副本。"""
+        cookies, self._login_cookies = self._login_cookies, []
+        return [dict(cookie) for cookie in cookies]
 
     def _verify_interactive_login(self) -> bool:
         """连接专用 Chrome 验证登录；成功后正常关闭浏览器以确保 Profile 刷盘。"""
@@ -691,13 +703,19 @@ class ChromeSource:
             if not contexts:
                 return False
             context = contexts[0]
-            authenticated = _has_login_cookie(context.cookies(platform.BASE))
+            site_cookies = filter_cookies_for_domain(
+                context.cookies(), platform.BASE,
+            )
+            authenticated = _has_login_cookie(site_cookies)
             if authenticated:
                 # connect_over_cdp() 取得的是远程 Chrome 连接；browser.close()
                 # 只会关闭 Playwright 连接，不能让由 interactive_login 启动的
                 # Chrome 进程退出。通过根 CDP 会话发送 Browser.close，才会走
                 # Chrome 自身的正常退出/落盘流程。
                 browser.new_browser_cdp_session().send("Browser.close")
+                self._login_cookies = [dict(cookie) for cookie in site_cookies]
+            else:
+                self._login_cookies = []
             return authenticated
 
     @staticmethod

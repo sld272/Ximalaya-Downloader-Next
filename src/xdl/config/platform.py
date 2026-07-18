@@ -20,7 +20,7 @@ TRACKS_LIST_URL = BASE + "/revision/album/getTracksList"
 TRACKS_PAGE_SIZE = 30   # 接口固定每页 30 条（传 pageSize 无效）
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 
 REFERER = BASE + "/"
 
