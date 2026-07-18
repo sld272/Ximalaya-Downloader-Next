@@ -210,7 +210,8 @@ def test_main_help_focuses_on_normal_user_flow(capsys):
 
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "{login,track,album,resume,gen-sign,risk-report}" in output
+    assert "{web,login,track,album,resume,gen-sign,risk-report}" in output
+    assert "启动本地 WebUI" in output
     assert "extract-device" not in output
     assert "refresh-cookies" not in output
     assert "inspect" not in output
@@ -230,6 +231,14 @@ def test_concurrency_must_be_positive(capsys):
 
     assert exc.value.code == 2
     assert "必须是大于 0 的整数" in capsys.readouterr().err
+
+
+def test_web_port_must_be_valid(capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["web", "--port", "0"])
+
+    assert exc.value.code == 2
+    assert "端口必须在 1 到 65535 之间" in capsys.readouterr().err
 
 
 def test_main_passes_custom_concurrency_to_settings(monkeypatch):

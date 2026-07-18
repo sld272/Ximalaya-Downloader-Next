@@ -9,8 +9,11 @@ import argparse
 import sys
 
 from ..application import Facade
+from ..application.diagnostics import (extract_device_identity,
+                                       generate_signatures,
+                                       refresh_login_cookies)
 from ..settings import Settings
-from ..errors import AuthError, XdlError, CancelledByUser
+from ..errors import XdlError, CancelledByUser
 from ..risk import summarize_risk_events
 
 
@@ -149,62 +152,43 @@ def _cmd_inspect(app: Facade, args) -> int:
 
 def _cmd_gen_sign(app: Facade, args) -> int:
     """纯算 xm-sign 冒烟：调用 PySignProvider 生成 xm-sign 并打印。"""
-    from ..adapters import PySignProvider
-
-    signer = PySignProvider(device_info_path=args.device_info)
-    signer.open()
-    try:
-        for i in range(args.repeat):
-            value = signer.sign()
-            print(f"[{i + 1}/{args.repeat}] xm-sign: {value}")
-    finally:
-        signer.close()
+    result = generate_signatures(args.device_info, args.repeat)
+    for i, value in enumerate(result["values"]):
+        print(f"[{i + 1}/{result['repeat']}] xm-sign: {value}")
     return 0
 
 
 def _cmd_extract_device(app: Facade, args) -> int:
     """从 Chrome Profile 提取 du_web_sdk 设备指纹到 JSON 文件。"""
-    from ..adapters.sign import (
-        identity_fingerprint,
-        refresh_device_identity_via_browser,
-        save_device_info,
-        summarize_extract,
-    )
-
     settings = Settings()
-    result = refresh_device_identity_via_browser(
-        profile_dir=args.profile or settings.chrome_profile_dir,
-        chrome_path=settings.chrome_path,
+    result = extract_device_identity(
+        settings,
+        output=args.output,
+        profile=args.profile,
         headless=not args.no_headless,
-        clear_device_state=bool(getattr(args, "refresh", False)),
+        refresh=bool(getattr(args, "refresh", False)),
         fresh_profile=bool(getattr(args, "fresh_profile", False)),
     )
-    out = args.output or settings.device_info_path
-    save_device_info(result.device_info, out)
-    print(f"已保存 {len(result.device_info)} 个字段到 {out}")
-    print(f"identity={identity_fingerprint(result.device_info)}")
-    print(summarize_extract(result))
+    print(f"已保存 {result['field_count']} 个字段到 {result['output_path']}")
+    print(f"identity={result['identity']}")
+    print(result["summary"])
     return 0
 
 
 def _cmd_refresh_cookies(app: Facade, args) -> int:
     """从 Chrome Profile 重新提取登录 Cookie 到 ~/.xdl/cookies.json。"""
-    from ..adapters.sign import (extract_cookies_from_profile, save_cookies,
-                                 is_login_cookie)
     settings = Settings()
-    cookies = extract_cookies_from_profile(
-        profile_dir=settings.chrome_profile_dir,
-        chrome_path=settings.chrome_path,
-        headless=not args.no_headless,
-    )
-    if not is_login_cookie(cookies):
-        raise AuthError(
-            "专用 Chrome Profile 中未发现登录 token（1&_token）；"
-            "未覆盖现有 Cookie 缓存。"
-        )
-    save_cookies(cookies, settings.cookies_cache_path)
-    print(f"已保存 {len(cookies)} 个 Cookie 到 {settings.cookies_cache_path}（已登录）")
+    result = refresh_login_cookies(settings, headless=not args.no_headless)
+    print(f"已保存 {result['cookie_count']} 个 Cookie 到 "
+          f"{result['output_path']}（已登录）")
     return 0
+
+
+def _cmd_web(app: Facade, args) -> int:
+    """启动本地 WebUI；由 Web 运行器自行装配 Facade。"""
+    from .web import serve
+    return serve(host=args.host, port=args.port,
+                 open_browser=not args.no_open)
 
 
 def _print_album_result(result) -> None:
@@ -243,9 +227,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(
         dest="command", required=True,
-        metavar="{login,track,album,resume,gen-sign,risk-report}",
+        metavar="{web,login,track,album,resume,gen-sign,risk-report}",
     )
 
+    p_web = sub.add_parser("web", help="启动本地 WebUI")
+    p_web.add_argument("--host", default="127.0.0.1",
+                       help="监听地址（默认 127.0.0.1）")
+    p_web.add_argument("--port", type=_port, default=8787,
+                       help="监听端口（默认 8787）")
+    p_web.add_argument("--no-open", action="store_true",
+                       help="启动后不自动打开浏览器")
     sub.add_parser("login", help="打开浏览器登录并保存会话")
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
@@ -313,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "experiment_rotate_headless", None) is not None:
         settings.experiment_rotate_headless = bool(args.experiment_rotate_headless)
     handlers = {
+        "web": _cmd_web,
         "login": _cmd_login,
         "track": _cmd_track,
         "album": _cmd_album,
@@ -344,6 +336,13 @@ def _positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("必须是大于 0 的整数")
+    return number
+
+
+def _port(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 65535:
+        raise argparse.ArgumentTypeError("端口必须在 1 到 65535 之间")
     return number
 
 

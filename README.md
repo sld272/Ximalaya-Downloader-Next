@@ -24,7 +24,16 @@
 pip install -e .
 ```
 
-首次使用先登录：
+启动本地 WebUI：
+
+```bash
+xdl web
+# 或：xdl-web
+```
+
+程序会自动打开 `http://127.0.0.1:8787`。在页面顶部点击“尚未登录”即可完成首次登录；随后可在同一个界面新建单曲/专辑下载、选择音质与区间、恢复任务、查看本地风控报告并调整运行设置。
+
+也可以继续使用 CLI。首次使用先登录：
 
 ```bash
 xdl login
@@ -42,6 +51,7 @@ xdl album <专辑链接或 albumId>
 ## 常用命令
 
 ```bash
+xdl web                               # 启动本地 WebUI
 xdl login                              # 首次登录或重新登录
 xdl track <链接或ID>                    # 下载单个音频
 xdl track -F <链接或ID>                 # 列出所有可用音质格式，不下载
@@ -62,6 +72,8 @@ xdl --concurrency 3 resume
 ```
 
 默认下载目录为当前目录下的 `downloads`。
+
+WebUI 默认只监听本机回环地址，没有远程访问认证。不要把它直接暴露到公网；确需修改监听地址时可使用 `xdl web --host <地址> --port <端口>`。
 
 ### 下载行为
 
@@ -114,17 +126,6 @@ xdl --source-backend chrome track <链接或ID>
 
 该路径主要用于登录与兼容诊断。只有在默认 HTTP 后端暂时不兼容且你理解其限制时才使用它。
 
-## 终端面板
-
-安装可选依赖：
-
-```bash
-pip install -e '.[tui]'
-xdl-tui
-```
-
-终端面板提供链接输入、音质与区间选择、下载/恢复/停止/登录按钮，以及从任务库刷新的逐集状态表。它与 CLI 使用同一个默认 HTTP 后端。
-
 ## 本地数据
 
 默认用户数据位于 `~/.xdl`：
@@ -155,7 +156,7 @@ app.resume()
 ## 开发与验证
 
 ```bash
-pip install -e '.[dev,tui]'
+pip install -e '.[dev]'
 python -m pytest -q
 python -m compileall -q src tests
 ```
@@ -166,6 +167,7 @@ python -m compileall -q src tests
 
 - [项目现状与范围](./docs/overview.md)
 - [架构设计](./docs/architecture.md)
+- [WebUI 使用与接口](./docs/webui.md)
 
 ## 免责声明与许可证
 

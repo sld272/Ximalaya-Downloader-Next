@@ -878,6 +878,126 @@ def test_risk_rotate_waits_cooldown(monkeypatch):
     assert src._device_rotations == 1
 
 
+def test_maybe_rotate_returns_true_while_awaiting_success(monkeypatch):
+    """已有换身待验证时，并发 worker 应 co-probe，而不是 re-raise 熔断。"""
+    src = _make_http_source(
+        monkeypatch,
+        experiment_rotate_device_on_risk=True,
+    )
+    _run_async(src.open())
+    src._rotate_awaiting_success = True
+    rotate_calls = []
+
+    async def boom():
+        rotate_calls.append(1)
+        raise AssertionError("awaiting 时不得叠加换身")
+
+    src.rotate_device_identity = boom  # type: ignore[method-assign]
+    assert _run_async(src._maybe_rotate_after_risk()) is True
+    assert rotate_calls == []
+    assert src._device_rotations == 0
+
+
+def test_co_probe_success_prevents_peer_disable(monkeypatch):
+    """co-probe 已验证成功后，迟到的风控不得再停用本会话换身。"""
+    src = _make_http_source(
+        monkeypatch,
+        experiment_rotate_device_on_risk=True,
+    )
+    _run_async(src.open())
+    src._rotate_awaiting_success = False
+    src._rotate_disabled = False
+    src._pending_device_info = {"HW5": "should-not-clear-via-late-disable"}
+    src._pending_device_generation = 1
+
+    src._disable_rotate_after_immediate_risk()
+
+    assert src._rotate_disabled is False
+    assert src._rotate_awaiting_success is False
+    # awaiting 已清时 no-op，不应误清 pending（pending 应由成功路径清理）
+    assert src._pending_device_info == {"HW5": "should-not-clear-via-late-disable"}
+
+
+def test_concurrent_risk_co_probe_reuses_in_progress_rotation(monkeypatch):
+    """并发两路同时风控：只换身一次，另一路等待后用新身份 co-probe 成功。"""
+    import asyncio
+    import threading
+
+    import xdl.adapters.source_http as mod
+
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    src = _make_http_source(
+        monkeypatch,
+        experiment_rotate_device_on_risk=True,
+        experiment_risk_cooldown_seconds=0.0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+
+    # 线程安全的响应序列：两路先 risk，换身后两路 ok。
+    responses = [risk, risk, ok, ok]
+    response_lock = threading.Lock()
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+            self.status_code = 200
+            self.text = json.dumps(body)
+
+        def json(self):
+            return self._body
+
+    def fake_get(_url, params=None, headers=None, timeout=None):
+        with response_lock:
+            if not responses:
+                raise AssertionError("Unexpected extra baseInfo call")
+            body = responses.pop(0)
+        return _FakeResp(body)
+
+    monkeypatch.setattr(
+        mod.HttpSource, "_http_get",
+        lambda self, u, p, h: fake_get(u, p, h),
+    )
+
+    rotate_started = asyncio.Event()
+    release_rotate = asyncio.Event()
+    rotate_calls = []
+    original_rotate = src.rotate_device_identity
+
+    async def gated_rotate():
+        rotate_calls.append(1)
+        rotate_started.set()
+        await release_rotate.wait()
+        return await original_rotate()
+
+    src.rotate_device_identity = gated_rotate  # type: ignore[method-assign]
+
+    async def scenario():
+        t1 = asyncio.create_task(src.get_track("1"))
+        await rotate_started.wait()
+        t2 = asyncio.create_task(src.get_track("2"))
+        # 让第二路撞上风控并卡在 _rotate_lock 上
+        await asyncio.sleep(0.05)
+        release_rotate.set()
+        return await asyncio.gather(t1, t2)
+
+    tracks = _run_async(scenario())
+    assert [t.title for t in tracks] == ["ok", "ok"]
+    assert len(rotate_calls) == 1
+    assert src._sign.reload_count == 1
+    assert src._device_rotations == 1
+    assert src._rotate_disabled is False
+    assert src._rotate_awaiting_success is False
+    assert responses == []
+
+
 def test_open_keeps_device_cookies_when_strip_disabled(monkeypatch):
     src = _make_http_source(
         monkeypatch,
