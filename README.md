@@ -51,14 +51,14 @@ xdl album <专辑链接或 albumId>
 ## 常用命令
 
 ```bash
-xdl web                               # 启动本地 WebUI
+xdl web                                # 启动本地 WebUI
 xdl login                              # 首次登录或重新登录
 xdl track <链接或ID>                    # 下载单个音频
 xdl track -F <链接或ID>                 # 列出所有可用音质格式，不下载
 xdl album <链接或ID>                    # 下载整张专辑
 xdl album <链接或ID> --range 1-20       # 只下载指定区间
 xdl album <链接或ID> --quality high     # high / standard / low
-xdl --concurrency 3 album <链接或ID>     # 自定义异步并发数（默认 1）
+xdl --concurrency 3 album <链接或ID>    # 自定义异步并发数（默认 1）
 xdl resume                             # 恢复未完成任务
 xdl gen-sign                           # 检查本地签名链路
 xdl risk-report                        # 汇总本地风控记录，不发网络请求
