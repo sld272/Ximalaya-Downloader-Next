@@ -229,6 +229,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="[实验] 命中风控后用浏览器刷新设备指纹并重试（默认关闭；不保证有效）",
     )
+    parser.add_argument(
+        "--experiment-risk-cooldown",
+        type=float,
+        metavar="SEC",
+        help="[实验] 风控后换身/探针前冷却秒数（默认 15；0=不等待）",
+    )
+    parser.add_argument(
+        "--experiment-rotate-headless",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="[实验] 换身是否无头（默认有头；--experiment-rotate-headless 强制无头）",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True,
         metavar="{login,track,album,resume,gen-sign,risk-report}",
@@ -296,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
         settings.max_concurrency = args.concurrency
     if getattr(args, "experiment_rotate_device", False):
         settings.experiment_rotate_device_on_risk = True
+    if getattr(args, "experiment_risk_cooldown", None) is not None:
+        settings.experiment_risk_cooldown_seconds = float(args.experiment_risk_cooldown)
+    if getattr(args, "experiment_rotate_headless", None) is not None:
+        settings.experiment_rotate_headless = bool(args.experiment_rotate_headless)
     handlers = {
         "login": _cmd_login,
         "track": _cmd_track,

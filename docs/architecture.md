@@ -63,14 +63,14 @@ device_info
   → URI 字节编码
   → zlib
   → AES-ECB + PKCS#7
-  → POST hdaa report
+  → POST 设备上报服务
   → Base64 解码 + AES 解密
   → 同一次响应中的 cadd && sid
 ```
 
 每次 `sign()` 进行一次设备上报，并使用该响应成对返回的 `cadd` 与 `sid`。旧的 `cadd` 缓存没有减少上报次数，还可能组合不匹配的数据，已移除内部缓存逻辑；兼容构造参数仍暂时保留。
 
-设备信息优先读取 `~/.xdl/device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。
+设备信息优先读取 `~/.xdl/device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。加载设备信息时会对明显异常的 UA 字段做规范化，使上报载荷与常规浏览器形态一致；这不替代登录或内容授权。
 
 ### 3.3 HTTP 音源
 
@@ -86,13 +86,13 @@ device_info
 
 专辑曲目清单由 `_album_list.py` 调用公开的 `/revision/album/getTracksList`，不需要 `xm-sign`。
 
-可选实验功能：`Settings.experiment_rotate_device_on_risk` 开启时，`HttpSource` 在已识别风控后通过浏览器清设备态、采集新的 `device_info`、`SignProvider.reload`，并重试当前曲。新指纹先只在会话内试用，首次成功后才原子写回；首次仍风控则停用并保留旧文件。默认关闭，不保证服务端接受。
+可选实验功能：`Settings.experiment_rotate_device_on_risk`（CLI：`--experiment-rotate-device`）开启时，在识别到风控后可刷新本地设备信息并重试当前曲。默认关闭；其余参数见 `Settings`。该能力不保证恢复可用，也不构成对平台访问控制的绕过。
 
 ### 3.4 Chrome 兼容音源
 
 `--source-backend chrome` 选择 `ChromeSource`。它启动 Chrome 后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。
 
-该路径保留登录、诊断和兼容价值，但历史观测表明 CDP 环境可能被平台识别，因此不是默认下载实现。设备指纹重置实验默认关闭，也不在登录流程执行。
+该路径保留登录、诊断和兼容价值，但历史观测表明 CDP 环境可能被平台识别，因此不是默认下载实现。旧的设备状态重置实验默认关闭，也不在登录流程执行。
 
 ## 4. 任务与恢复
 
@@ -135,7 +135,7 @@ device_info
 
 `config.paths.xdl_home()` 是用户数据目录的单一来源，默认 `~/.xdl`，可由 `XDL_HOME` 覆盖。`Settings` 使用它生成 Profile、Cookie、任务库、设备信息和风控日志路径。
 
-命令行当前可覆盖下载目录、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。设备指纹刷新的细项（是否清 storage、硬上限、是否写回磁盘等）通过 Python `Settings` 配置。
+命令行当前可覆盖下载目录、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。设备信息相关细项通过 Python `Settings` 配置。
 
 ## 8. 测试边界
 

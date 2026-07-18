@@ -63,9 +63,11 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             experiment_rotate_device_on_risk=settings.experiment_rotate_device_on_risk,
             experiment_browser_clear_state=settings.experiment_browser_clear_state,
             experiment_browser_fresh_profile=settings.experiment_browser_fresh_profile,
+            experiment_rotate_headless=settings.experiment_rotate_headless,
             experiment_persist_device_info=settings.experiment_persist_device_info,
             experiment_strip_device_cookies=settings.experiment_strip_device_cookies,
             experiment_max_rotations=settings.experiment_max_device_rotations,
+            experiment_risk_cooldown_seconds=settings.experiment_risk_cooldown_seconds,
             device_info_path=settings.device_info_path,
         )
     if backend == "chrome":

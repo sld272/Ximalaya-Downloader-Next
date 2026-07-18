@@ -16,7 +16,10 @@ import pytest
 
 from xdl.adapters.sign.py_sign import (PySignProvider, _aes_encrypt,
                                          _aes_decrypt, _process_payload,
-                                         _refresh_zf5, _json_dumps_compact)
+                                         _refresh_zf5, _json_dumps_compact,
+                                         _encode_le3, _atbash,
+                                         sanitize_device_info,
+                                         user_agent_from_device_info)
 from xdl.config import sign as sign_conf
 from xdl.errors import SignError
 from Crypto.Cipher import AES
@@ -32,6 +35,71 @@ def test_default_template_loads():
     assert info["Zf5"] == 0
     # 模板里已清除 HeadlessChrome 这一最明显的自动化 UA 指纹
     assert "HeadlessChrome" not in info["ew1"]["yV2"]
+
+
+def test_atbash_le3_roundtrip_matches_sdk_encoding():
+    """Le3 = Base64(atbash(UA))，与 du_web_sdk / 线上 device_info 一致。"""
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+    le3 = _encode_le3(ua)
+    pad = "=" * ((4 - len(le3) % 4) % 4)
+    assert _atbash(base64.b64decode(le3 + pad).decode("utf-8")) == ua
+    # 字母表反转冒烟
+    assert _atbash("Mozilla") == "Nlarooz"
+    assert _atbash("HeadlessChrome") == "SvzwovhhXsilnv"
+
+
+def test_sanitize_device_info_strips_headless_chrome_ua():
+    raw = {
+        "GF9": "2.0.0",
+        "Zf5": 0,
+        "ew1": {
+            "Wg7": "Mozilla",
+            "yV2": ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36"),
+            "Le3": _encode_le3(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36"
+            ),
+        },
+    }
+    cleaned, changed = sanitize_device_info(raw)
+    assert changed is True
+    assert "Headless" not in cleaned["ew1"]["yV2"]
+    assert "Chrome/150" in cleaned["ew1"]["yV2"]
+    ua = user_agent_from_device_info(cleaned)
+    assert ua is not None and "Headless" not in ua
+    assert cleaned["ew1"]["Le3"] == _encode_le3(ua)
+    # 原对象不被修改
+    assert "HeadlessChrome" in raw["ew1"]["yV2"]
+
+
+def test_sanitize_device_info_noop_when_already_clean():
+    info = sign_conf.load_default_device_info()
+    cleaned, changed = sanitize_device_info(info)
+    assert changed is False
+    assert cleaned["ew1"]["yV2"] == info["ew1"]["yV2"]
+
+
+def test_load_device_info_sanitizes_headless_file(tmp_path):
+    path = tmp_path / "device-info.json"
+    payload = {
+        "GF9": "2.0.0",
+        "Zf5": 0,
+        "HW5": "x",
+        "ew1": {
+            "Wg7": "Mozilla",
+            "yV2": ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36"),
+            "Le3": "ignored-will-be-rewritten",
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    signer = PySignProvider(device_info_path=str(path))
+    signer.open()
+    info = signer.device_info()
+    assert "Headless" not in info["ew1"]["yV2"]
+    assert "Chrome/150" in user_agent_from_device_info(info)
 
 
 def test_refresh_zf5_updates_timestamp_for_default_template():

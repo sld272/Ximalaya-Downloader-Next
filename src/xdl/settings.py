@@ -59,6 +59,8 @@ class Settings:
     cookies_cache_path: str = ""
     # curl-cffi 的可选传输配置（仅 `source_backend = "http"` 下生效）。它不建立
     # 授权，也不保证平台接受请求；认证与风险响应始终由调用方处理。
+    # curl-cffi 本机实测可用的最新桌面 Chrome 伪装；chrome150 在当前 curl_cffi 上不支持。
+    # device_info 的 UA 可与本机 Chrome 大版本一致（如 150），TLS 指纹走这里。
     source_impersonate: str = "chrome146"
 
     # ---- 风控后刷新设备指纹（实验，默认关闭）----
@@ -66,11 +68,17 @@ class Settings:
     # 不保证服务端接受，也不是默认抗风控策略。
     experiment_rotate_device_on_risk: bool = False
     experiment_browser_clear_state: bool = True
-    experiment_browser_fresh_profile: bool = False
+    # 更真实的换身：临时全新 Profile + 只注入登录 Cookie（默认开）。
+    experiment_browser_fresh_profile: bool = True
+    # 换身采集默认有头；headless 会在 device_info 写入 HeadlessChrome。
+    # None = 跟随 chrome_headless；True/False 强制。
+    experiment_rotate_headless: bool | None = False
     experiment_persist_device_info: bool = True
     experiment_strip_device_cookies: bool = True
     # 0 = 不限次数（换身后首次成功才允许再换；首次仍风控则本会话停用）
     experiment_max_device_rotations: int = 0
+    # 命中风控后、换身/探针前的冷却（秒）。0 = 不等待。
+    experiment_risk_cooldown_seconds: float = 15.0
 
     def __post_init__(self):
         if self.max_concurrency < 1:

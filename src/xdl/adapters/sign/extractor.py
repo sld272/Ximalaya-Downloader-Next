@@ -105,6 +105,8 @@ def _launch_kwargs(
         viewport={"width": 1440, "height": 900},
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
+        # 与 Cookie 导出一致：不要用 Playwright mock keychain，避免 macOS 丢 Cookie。
+        ignore_default_args=["--password-store=basic", "--use-mock-keychain"],
         args=[
             "--no-first-run",
             "--no-default-browser-check",
@@ -120,6 +122,25 @@ def _launch_kwargs(
         # 优先系统 Google Chrome；与 easy-sign 用 Edge channel 同类思路。
         kwargs["channel"] = "chrome"
     return kwargs
+
+
+def _cookies_for_playwright(cookies: list[dict]) -> list[dict]:
+    """把缓存/导出 Cookie 转成 Playwright add_cookies 可用结构。"""
+    out: list[dict] = []
+    for cookie in cookies or []:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        domain = str(cookie.get("domain") or ".ximalaya.com")
+        path = str(cookie.get("path") or "/")
+        out.append({
+            "name": str(name),
+            "value": str(value),
+            "domain": domain,
+            "path": path,
+        })
+    return out
 
 
 def _filter_site_cookies(cookies: list[dict], domain: str = platform.BASE) -> list[dict]:
@@ -208,6 +229,7 @@ def extract_device_info(
 
     只读提取，不清理设备态。若需要「重生」指纹，请用
     `refresh_device_identity_via_browser`。
+    返回前会去掉 HeadlessChrome UA 痕迹（与 PySignProvider 上报消毒一致）。
     """
     result = refresh_device_identity_via_browser(
         profile_dir=profile_dir,
@@ -232,13 +254,16 @@ def refresh_device_identity_via_browser(
     clear_device_state: bool = True,
     fresh_profile: bool = False,
     post_clear_wait_ms: int = 2500,
+    seed_cookies: list[dict] | None = None,
 ) -> DeviceExtractResult:
     """打开真实浏览器，可选清设备态后让 du_web_sdk 重生，再采集指纹与 Cookie。
 
     Args:
         profile_dir: 专用 Profile；`fresh_profile=True` 时忽略并使用临时目录。
         clear_device_state: 导航前清设备 Cookie + storage，再二次加载以重生身份。
-        fresh_profile: 使用全新临时 Profile（完全新设备；不含登录态）。
+        fresh_profile: 使用全新临时 Profile（完全新设备）。
+        seed_cookies: 可选播种 Cookie（通常只含登录 token）。在 fresh Profile
+            上注入后，再让 SDK 生成**新**设备身份，更接近“新设备登录同账号”。
         wait_ms: 页面 load 后等待 SDK 初始化的时间。
         post_clear_wait_ms: 清 storage 后再次 goto 等待 SDK 重生的时间。
 
@@ -262,11 +287,18 @@ def refresh_device_identity_via_browser(
         work_profile = profile_dir
         os.makedirs(work_profile, exist_ok=True)
 
+    # 全新 Profile 上 SDK 冷启动更慢；默认给更长初始化窗口。
+    if used_temp and wait_ms < 6000:
+        wait_ms = 6000
+    if used_temp and post_clear_wait_ms < 3500:
+        post_clear_wait_ms = 3500
+
     try:
         cleared: list[str] = []
         storage_report: dict | None = None
         info: Optional[dict] = None
         cookies: list[dict] = []
+        seeded = 0
 
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
@@ -274,7 +306,19 @@ def refresh_device_identity_via_browser(
             )
             try:
                 page = ctx.new_page()
-                page.goto(url, wait_until="load", timeout=timeout_ms)
+                # 先落到站点域，再注入登录 Cookie，避免 add_cookies 因域未就绪失败。
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                seed_list = _cookies_for_playwright(list(seed_cookies or []))
+                if seed_list:
+                    try:
+                        ctx.add_cookies(seed_list)
+                        seeded = len(seed_list)
+                    except Exception as e:
+                        print(f"[warn] 播种登录 Cookie 失败: {e}")
+                    # 注入后再完整 load，让页面以登录态初始化 SDK。
+                    page.goto(url, wait_until="load", timeout=timeout_ms)
+                else:
+                    page.goto(url, wait_until="load", timeout=timeout_ms)
                 page.wait_for_timeout(wait_ms)
 
                 if clear_device_state:
@@ -283,6 +327,12 @@ def refresh_device_identity_via_browser(
                         storage_report = page.evaluate(_CLEAR_STORAGE_JS)
                     except Exception as e:
                         storage_report = {"error": str(e)}
+                    # 若清 Cookie 误伤了登录态，把播种 Cookie 再补回去。
+                    if seed_list:
+                        try:
+                            ctx.add_cookies(seed_list)
+                        except Exception:
+                            pass
                     # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份
                     page.goto(url, wait_until="load", timeout=timeout_ms)
                     page.wait_for_timeout(post_clear_wait_ms)
@@ -300,6 +350,23 @@ def refresh_device_identity_via_browser(
 
         if info is None:
             raise RuntimeError("未能从浏览器读取设备指纹。")
+
+        # headless 采集会把 HeadlessChrome 写进 UA；落盘/换身前先消毒，
+        # 避免 hdaa 上报持续自证为自动化环境。
+        try:
+            from .py_sign import sanitize_device_info
+            cleaned, changed = sanitize_device_info(info)
+            if changed:
+                info = cleaned
+                print(
+                    "[warn] 提取到的 device_info 含 HeadlessChrome，"
+                    "已改写为 Chrome。建议改用有头模式重新提取。"
+                )
+        except Exception:
+            pass
+
+        if seeded:
+            cleared = list(cleared) + [f"seeded_login={seeded}"]
 
         return DeviceExtractResult(
             device_info=info,

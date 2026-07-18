@@ -995,6 +995,16 @@ def test_is_device_fingerprint_cookie_matches_known_device_names():
     assert _is_device_fingerprint_cookie("wfp") is True
     assert _is_device_fingerprint_cookie("Hm_lvt_4a7d8ec50cfd6af753c4f8aee3425070") is True
     assert _is_device_fingerprint_cookie("Hm_lpvt_4a7d8ec50cfd6af753c4f8aee3425070") is True
+    # 扩大后的设备/反垃圾载体
+    assert _is_device_fingerprint_cookie("crystal") is True
+    assert _is_device_fingerprint_cookie("HMACCOUNT") is True
+    assert _is_device_fingerprint_cookie("cid") is True
+    assert _is_device_fingerprint_cookie("_antispam_") is True
+    assert _is_device_fingerprint_cookie("assva5") is True
+    assert _is_device_fingerprint_cookie("assva6") is True
+    assert _is_device_fingerprint_cookie("cmci9xde") is True
+    assert _is_device_fingerprint_cookie("vmce9xdq") is True
+    assert _is_device_fingerprint_cookie("pmck9xge") is True
 
 
 def test_is_device_fingerprint_cookie_keeps_login_cookies():
@@ -1002,6 +1012,8 @@ def test_is_device_fingerprint_cookie_keeps_login_cookies():
     assert _is_device_fingerprint_cookie("1&remember_me") is False
     assert _is_device_fingerprint_cookie("web_login") is False
     assert _is_device_fingerprint_cookie("tgw_l7_route") is False
+    assert _is_device_fingerprint_cookie("HWWAFSESID") is False
+    assert _is_device_fingerprint_cookie("impl") is False
 
 
 def test_reset_device_cookies_drops_device_cookies_keeps_login():

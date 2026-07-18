@@ -30,10 +30,11 @@ from ..ports import Decoder, SignProvider
 from ..risk import RiskEventRecorder
 from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
                            load_cached_cookies, save_cookies, is_login_cookie,
-                           strip_device_cookies)
+                           login_cookies_only, strip_device_cookies)
 from .sign.extractor import (identity_fingerprint,
                              refresh_device_identity_via_browser,
                              save_device_info, summarize_extract)
+from .sign.py_sign import user_agent_from_device_info
 from ._album_list import fetch_album as _fetch_album_list
 
 # 与 ChromeSource 的风控判定保持一致：3005 是复用码，仅在 msg 含"系统繁忙"时
@@ -98,10 +99,12 @@ class HttpSource:
         impersonate: str = "chrome146",
         experiment_rotate_device_on_risk: bool = False,
         experiment_browser_clear_state: bool = True,
-        experiment_browser_fresh_profile: bool = False,
+        experiment_browser_fresh_profile: bool = True,
+        experiment_rotate_headless: bool | None = False,
         experiment_persist_device_info: bool = True,
         experiment_strip_device_cookies: bool = True,
         experiment_max_rotations: int = 0,
+        experiment_risk_cooldown_seconds: float = 15.0,
         device_info_path: str = "",
     ):
         """初始化 HTTP 音源。
@@ -131,9 +134,12 @@ class HttpSource:
         self._experiment_rotate = bool(experiment_rotate_device_on_risk)
         self._experiment_browser_clear = bool(experiment_browser_clear_state)
         self._experiment_fresh_profile = bool(experiment_browser_fresh_profile)
+        # None = 跟随 chrome_headless；否则强制有头/无头。
+        self._experiment_rotate_headless = experiment_rotate_headless
         self._experiment_persist = bool(experiment_persist_device_info)
         self._experiment_strip_cookies = bool(experiment_strip_device_cookies)
         self._experiment_max_rotations = max(0, int(experiment_max_rotations))
+        self._experiment_risk_cooldown = max(0.0, float(experiment_risk_cooldown_seconds))
         self._device_info_path = device_info_path or ""
         if impersonate and not _HAS_CURL_CFFI:
             raise ConfigError(
@@ -199,8 +205,7 @@ class HttpSource:
                 "专用 Chrome Profile 中未取到任何 Cookie。"
                 "请重新 `xdl login` 确保登录态后重试。"
             )
-        self._cookie_header = build_cookie_header(self._cookies)
-        self._authenticated = is_login_cookie(self._cookies)
+        self._install_cookies(self._cookies, strip_device=self._experiment_strip_cookies)
         if not self._authenticated:
             print("[warn] 当前 Cookie 中没有发现登录 token（1&_token），会员/已购内容将被拒。")
 
@@ -213,9 +218,8 @@ class HttpSource:
             self._chrome_headless,
         )
         await self._save_authenticated_cookies(cookies)
-        self._cookies = cookies
-        self._cookie_header = build_cookie_header(cookies)
-        self._authenticated = True
+        # 运行态仍可剥离设备 Cookie；落盘缓存保留完整导出，便于诊断。
+        self._install_cookies(cookies, strip_device=self._experiment_strip_cookies)
 
     def _build_base_info_url(self) -> str:
         """构造 baseInfo 端点 URL：在路径里嵌入当前毫秒时间戳。
@@ -240,9 +244,23 @@ class HttpSource:
             timeout=self._resolve_timeout,
         )
 
+    def _fallback_user_agent(self) -> str:
+        """无 impersonate 时的 UA：优先与 signer 的 device_info 对齐。"""
+        getter = getattr(self._sign, "device_info", None)
+        if callable(getter):
+            try:
+                ua = user_agent_from_device_info(getter())
+                if ua and "Headless" not in ua:
+                    return ua
+            except Exception:
+                pass
+        return platform.UA
+
     # ---- Source 端口：单曲 ----
     async def get_track(self, track_id: str) -> Track:
-        if not self._cookies:
+        # open() 后 _authenticated 必为 True/False；None 表示尚未加载会话。
+        # 不能用 `not self._cookies`：匿名态剥离设备 Cookie 后列表可能为空。
+        if self._authenticated is None:
             raise NetworkError("会话未打开，请先 await open()。")
         # 风控换身：本曲最多换一次；换身后首次成功则本会话允许后续再换，
         # 换身后首次仍风控则停用本会话换身。默认关闭时循环只跑一轮。
@@ -282,7 +300,9 @@ class HttpSource:
                 recorded = True
                 raise e from None
 
-            # 只补业务所需的 Accept / Referer / Origin / Cookie / xm-sign 字段。
+            # 对齐页面 XHR：Accept / Referer / Origin / Cookie / xm-sign + Sec-Fetch-*。
+            # TLS/JA3 与默认 UA 由 curl-cffi impersonate 负责；这里不重复覆盖 UA，
+            # 避免与 impersonate 的 Client Hints 错位。
             headers = {
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -290,10 +310,13 @@ class HttpSource:
                 "Origin": platform.BASE,
                 "Cookie": self._cookie_header,
                 "xm-sign": sign_value,
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
             }
             if not self._impersonate:
                 # 回退到 requests 时必填 UA（requests UA 是 python-requests/xxx，立刻被判罚）
-                headers["User-Agent"] = platform.UA
+                headers["User-Agent"] = self._fallback_user_agent()
             url = self._build_base_info_url()
             params = {
                 "device": sign_conf.BASE_INFO_DEVICE,
@@ -414,6 +437,7 @@ class HttpSource:
         """风控后是否执行实验性换身。成功返回 True 并允许重试当前曲。
 
         策略：
+        - 先按 `experiment_risk_cooldown_seconds` 冷却，避免热惩罚窗内连打；
         - 换身后、尚未出现成功请求前，不再叠加换身（由 get_track 本地标记判定
           首次探针失败并停用）；
         - 换身后曾成功 → 允许再次换身；
@@ -434,6 +458,12 @@ class HttpSource:
                     f"{self._experiment_max_rotations}，停止换身"
                 )
                 return False
+            if self._experiment_risk_cooldown > 0:
+                print(
+                    f"[experiment] 风控冷却 "
+                    f"{self._experiment_risk_cooldown:.0f}s 后再换身…"
+                )
+                await asyncio.sleep(self._experiment_risk_cooldown)
             try:
                 await self.rotate_device_identity()
             except Exception as e:
@@ -442,12 +472,25 @@ class HttpSource:
             self._rotate_awaiting_success = True
             return True
 
+    def _install_cookies(self, cookies: list[dict], *, strip_device: bool) -> None:
+        """安装运行态 Cookie；可选剥离设备身份碎片（保留登录 token）。"""
+        installed = list(cookies or [])
+        if strip_device and installed:
+            installed = strip_device_cookies(installed)
+        self._cookies = installed
+        self._cookie_header = build_cookie_header(installed)
+        self._authenticated = is_login_cookie(installed)
+
     async def rotate_device_identity(self) -> str:
         """通过真实浏览器重生设备指纹，并可选更新 Cookie。
 
-        打开 Chrome，清设备 Cookie/storage，让 du_web_sdk 重生后再采集
-        device_info。需要 SignProvider 实现 `reload(device_info)`。
-        不保证服务端接受新身份。
+        更接近「新设备登录同账号」：
+        1. 默认用临时全新 Profile（不复用被惩罚的专用 Profile 设备态）；
+        2. 只把登录 Cookie 播种进去；
+        3. 默认有头采集，避免 HeadlessChrome 写进 device_info；
+        4. 清 storage 后让 du_web_sdk 重生，再采集 device_info。
+
+        需要 SignProvider 实现 `reload(device_info)`。不保证服务端接受新身份。
         """
         reload_fn = getattr(self._sign, "reload", None)
         if not callable(reload_fn):
@@ -459,13 +502,43 @@ class HttpSource:
                 "换身需要 chrome_profile_dir，或开启 experiment_browser_fresh_profile。"
             )
 
+        # 播种登录态：运行态 cookies（可能已剥离设备）+ 缓存完整导出里的登录项。
+        seed_source = list(self._cookies or [])
+        if self._cookies_cache_path:
+            try:
+                cached = await asyncio.to_thread(
+                    load_cached_cookies, self._cookies_cache_path, 86400 * 30,
+                )
+                if cached:
+                    seed_source.extend(cached)
+            except Exception:
+                pass
+        seed = login_cookies_only(seed_source)
+        if not seed and self._experiment_fresh_profile:
+            print(
+                "[warn] 换身未找到可播种的登录 Cookie；"
+                "fresh Profile 采集到的身份可能是匿名态。"
+            )
+
+        if self._experiment_rotate_headless is None:
+            rotate_headless = bool(self._chrome_headless)
+        else:
+            rotate_headless = bool(self._experiment_rotate_headless)
+        mode = "headless" if rotate_headless else "headed"
+        profile_mode = "fresh-temp" if self._experiment_fresh_profile else "reuse-profile"
+        print(
+            f"[experiment] 开始真实换身 mode={mode} profile={profile_mode} "
+            f"seed_login={len(seed)}"
+        )
+
         result = await asyncio.to_thread(
             refresh_device_identity_via_browser,
-            profile_dir=self._profile_dir,
+            profile_dir="" if self._experiment_fresh_profile else self._profile_dir,
             chrome_path=self._chrome_path,
-            headless=self._chrome_headless,
+            headless=rotate_headless,
             clear_device_state=self._experiment_browser_clear,
             fresh_profile=self._experiment_fresh_profile,
+            seed_cookies=seed,
         )
         print(f"[experiment] 浏览器提取：{summarize_extract(result)}")
         cookie_note = self._apply_rotated_cookies(result)
@@ -483,40 +556,43 @@ class HttpSource:
                  if self._experiment_max_rotations > 0 else "∞")
         print(
             f"[experiment] 已换设备指纹 identity={fp} "
-            f"(第 {self._device_rotations}/{limit} 次；{cookie_note})"
+            f"(第 {self._device_rotations}/{limit} 次；{cookie_note}; "
+            f"temp_profile={result.used_temp_profile})"
         )
         return fp
 
     def _apply_rotated_cookies(self, result) -> str:
-        """把浏览器导出的 Cookie 应用到当前 HTTP 会话，返回日志摘要。"""
+        """把浏览器导出的 Cookie 应用到当前 HTTP 会话，返回日志摘要。
+
+        落盘缓存写入剥离前的完整导出（若含登录 token），运行态始终按
+        `experiment_strip_device_cookies` 决定是否去掉设备身份碎片。
+        """
         cookie_note = "cookies=unchanged"
         if result.cookies:
-            cookies = result.cookies
-            if self._experiment_strip_cookies:
-                cookies = strip_device_cookies(cookies)
-            if is_login_cookie(cookies) or not self._cookies:
-                self._cookies = cookies
-                self._cookie_header = build_cookie_header(cookies)
-                self._authenticated = is_login_cookie(cookies)
+            export = list(result.cookies)
+            # 仅当导出仍带登录 token 时才覆盖运行态；否则保留旧登录 Cookie，
+            # 只做设备身份剥离，避免 fresh_profile 等路径把会话弄丢。
+            if is_login_cookie(export) or not self._cookies:
+                if is_login_cookie(export) and self._cookies_cache_path:
+                    try:
+                        save_cookies(export, self._cookies_cache_path)
+                    except OSError:
+                        pass
+                self._install_cookies(
+                    export, strip_device=self._experiment_strip_cookies,
+                )
                 cookie_note = (
                     f"cookies=browser_export login={self._authenticated} "
                     f"cleared={','.join(result.cleared_cookie_names[:8]) or '-'}"
                 )
-                if is_login_cookie(cookies) and self._cookies_cache_path:
-                    try:
-                        save_cookies(cookies, self._cookies_cache_path)
-                    except OSError:
-                        pass
             else:
                 if self._experiment_strip_cookies and self._cookies:
-                    self._cookies = strip_device_cookies(self._cookies)
-                    self._cookie_header = build_cookie_header(self._cookies)
-                    self._authenticated = is_login_cookie(self._cookies)
+                    self._install_cookies(
+                        self._cookies, strip_device=True,
+                    )
                 cookie_note = "cookies=kept_login_stripped_device(export_lost_token)"
         elif self._experiment_strip_cookies and self._cookies:
-            self._cookies = strip_device_cookies(self._cookies)
-            self._cookie_header = build_cookie_header(self._cookies)
-            self._authenticated = is_login_cookie(self._cookies)
+            self._install_cookies(self._cookies, strip_device=True)
             cookie_note = "cookies=stripped_device_only"
         return cookie_note
 
@@ -549,9 +625,8 @@ class HttpSource:
         cookies = take_cookies()
         # 没有 token 就视为失败，绝不覆盖旧缓存。
         self._save_authenticated_cookies_sync(cookies)
-        self._cookies = cookies
-        self._cookie_header = build_cookie_header(cookies)
-        self._authenticated = True
+        # 登录成功后运行态同样可剥离设备 Cookie；缓存写入完整会话。
+        self._install_cookies(cookies, strip_device=self._experiment_strip_cookies)
         return path
 
     async def _save_authenticated_cookies(self, cookies: list[dict]) -> None:

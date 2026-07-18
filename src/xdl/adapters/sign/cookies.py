@@ -22,14 +22,30 @@ from ...config import platform
 
 _LOGIN_COOKIE_SUFFIX = "&_token"
 
-# 与 ChromeSource 一致：设备标识 Cookie 前缀。剥离它们可在 HTTP 实验中
-# 尝试与新的 device_info 对齐（保留登录 token）。
-_DEVICE_COOKIE_PREFIXES = ("_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_")
+# 设备/反垃圾/埋点类 Cookie。剥离它们可在 HTTP 路径上让身份主要跟
+# xm-sign 的 device_info 走，避免 Cookie 碎片把“新身”粘回旧惩罚态。
+# 前缀匹配：历史设备 ID、百度统计、SDK 混淆键（assva*/cmci*/vmce*/pmck*）。
+_DEVICE_COOKIE_PREFIXES = (
+    "_xmLog", "wfp", "Hm_lvt_", "Hm_lpvt_",
+    "assva", "cmci", "vmce", "pmck",
+)
+# 精确名：localStorage 镜像到 Cookie 的设备指纹、统计账户镜像等。
+_DEVICE_COOKIE_EXACT = frozenset({
+    "crystal",
+    "HMACCOUNT",
+    "cid",
+    "_antispam_",
+})
 
 
 def is_device_fingerprint_cookie(name) -> bool:
     """判断 Cookie 名是否为设备/统计类指纹载体（不读 value）。"""
-    return str(name or "").startswith(_DEVICE_COOKIE_PREFIXES)
+    text = str(name or "")
+    if not text:
+        return False
+    if text in _DEVICE_COOKIE_EXACT:
+        return True
+    return text.startswith(_DEVICE_COOKIE_PREFIXES)
 
 
 def strip_device_cookies(cookies: Iterable[dict]) -> list[dict]:
@@ -57,6 +73,26 @@ def is_login_cookie(cookies: Iterable[dict]) -> bool:
         str(c.get("name") or "").endswith(_LOGIN_COOKIE_SUFFIX) and bool(c.get("value"))
         for c in cookies
     )
+
+
+def is_login_related_cookie(name) -> bool:
+    """是否为应跨设备保留的登录相关 Cookie（不含设备指纹）。"""
+    text = str(name or "")
+    if not text:
+        return False
+    if text.endswith(_LOGIN_COOKIE_SUFFIX):
+        return True
+    if text.endswith("&remember_me"):
+        return True
+    return text in {"web_login"}
+
+
+def login_cookies_only(cookies: Iterable[dict]) -> list[dict]:
+    """只保留登录相关 Cookie，供全新 Profile 播种登录态。"""
+    return [
+        dict(c) for c in cookies
+        if is_login_related_cookie(c.get("name")) and c.get("value") is not None
+    ]
 
 
 def extract_cookies_from_profile(
