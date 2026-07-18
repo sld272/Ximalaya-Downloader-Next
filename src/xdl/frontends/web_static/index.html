@@ -340,9 +340,11 @@
                 <label class="switch-row"><input name="experiment_rotate_device_on_risk" type="checkbox"><span>风控后尝试刷新设备身份</span></label>
                 <label class="switch-row"><input name="experiment_browser_clear_state" type="checkbox"><span>采集前清设备状态</span></label>
                 <label class="switch-row"><input name="experiment_browser_fresh_profile" type="checkbox"><span>使用临时新 Profile</span></label>
+                <label class="switch-row"><input name="experiment_rotate_headless" type="checkbox"><span>换身时使用无头浏览器</span></label>
                 <label class="switch-row"><input name="experiment_persist_device_info" type="checkbox"><span>成功后保存设备信息</span></label>
                 <label class="switch-row"><input name="experiment_strip_device_cookies" type="checkbox"><span>刷新时剥离设备 Cookie</span></label>
               </div>
+              <label class="field-row"><span>换身冷却秒数（0 为不等待）</span><input name="experiment_risk_cooldown_seconds" type="number" min="0" max="3600" step="0.5"></label>
               <label class="field-row"><span>最多刷新次数（0 为不限）</span><input name="experiment_max_device_rotations" type="number" min="0"></label>
             </div>
           </details>

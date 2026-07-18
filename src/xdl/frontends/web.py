@@ -80,9 +80,13 @@ class SettingsUpdate(StrictModel):
     experiment_rotate_device_on_risk: bool | None = None
     experiment_browser_clear_state: bool | None = None
     experiment_browser_fresh_profile: bool | None = None
+    experiment_rotate_headless: bool | None = None
     experiment_persist_device_info: bool | None = None
     experiment_strip_device_cookies: bool | None = None
     experiment_max_device_rotations: int | None = Field(default=None, ge=0, le=100)
+    experiment_risk_cooldown_seconds: float | None = Field(
+        default=None, ge=0, le=3600,
+    )
 
 
 def create_app(runtime: WebRuntime | None = None) -> FastAPI:

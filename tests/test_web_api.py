@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
+from dataclasses import fields
+
 from fastapi.testclient import TestClient
 
-from xdl.frontends.web import create_app
+from xdl.frontends.web import SettingsUpdate, create_app
 from xdl.frontends.web_runtime import OperationBusyError
+from xdl.settings import Settings
 
 
 class FakeRuntime:
@@ -97,8 +100,16 @@ def test_webui_static_shell_is_served():
 
     assert page.status_code == 200
     assert "下载任务" in page.text
+    assert 'name="experiment_risk_cooldown_seconds"' in page.text
+    assert 'name="experiment_rotate_headless"' in page.text
     assert "javascript" in script.headers["content-type"]
     assert "text/css" in styles.headers["content-type"]
+
+
+def test_web_settings_update_contract_matches_settings():
+    assert set(SettingsUpdate.model_fields) == {
+        field.name for field in fields(Settings)
+    }
 
 
 def test_web_api_rejects_invalid_download_shape():
@@ -128,9 +139,13 @@ def test_web_api_updates_settings_and_opens_task_directory():
         settings = client.put("/api/settings", json={
             "download_dir": "/tmp/audio",
             "max_concurrency": 2,
+            "experiment_risk_cooldown_seconds": 12.5,
+            "experiment_rotate_headless": True,
         })
         opened = client.post("/api/open-downloads", json={"task_id": 9})
 
     assert settings.status_code == 200
     assert settings.json()["settings"]["max_concurrency"] == 2
+    assert settings.json()["settings"]["experiment_risk_cooldown_seconds"] == 12.5
+    assert settings.json()["settings"]["experiment_rotate_headless"] is True
     assert opened.json()["task_id"] == 9
