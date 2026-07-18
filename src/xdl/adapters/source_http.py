@@ -424,7 +424,13 @@ class HttpSource:
         )
 
     def _disable_rotate_after_immediate_risk(self) -> None:
-        """换身后首次请求仍风控：本会话停用换身，避免无效连打。"""
+        """换身后首次请求仍风控：本会话停用换身，避免无效连打。
+
+        若 `_rotate_awaiting_success` 已是 False，说明别的 co-probe 已验证成功，
+        本路迟到的风控不得再把会话标成 disable。
+        """
+        if not self._rotate_awaiting_success:
+            return
         self._pending_device_info = None
         self._pending_device_generation = None
         self._rotate_awaiting_success = False
@@ -438,8 +444,8 @@ class HttpSource:
 
         策略：
         - 先按 `experiment_risk_cooldown_seconds` 冷却，避免热惩罚窗内连打；
-        - 换身后、尚未出现成功请求前，不再叠加换身（由 get_track 本地标记判定
-          首次探针失败并停用）；
+        - 换身后、尚未出现成功请求前，不再叠加换身；其它并发 worker 应复用
+          已换身份做 co-probe（返回 True），而不是 re-raise 旧风控触发整批熔断；
         - 换身后曾成功 → 允许再次换身；
         - `experiment_max_rotations > 0` 时额外施加硬上限；`0` 表示不限次数。
         """
@@ -449,8 +455,9 @@ class HttpSource:
             if self._rotate_disabled:
                 return False
             if self._rotate_awaiting_success:
-                # 上一次换身的探针尚未出结果，不叠加换身。
-                return False
+                # 已有换身待验证：禁止叠加换身，但允许本请求用新身份重试。
+                print("[experiment] 已有换身待验证，改用新身份重试")
+                return True
             if (self._experiment_max_rotations > 0
                     and self._device_rotations >= self._experiment_max_rotations):
                 print(
