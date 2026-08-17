@@ -32,6 +32,18 @@ where = ["src"]
 "xdl.config" = ["*.json"]
 "xdl.frontends" = ["web_static/*.html", "web_static/*.css", "web_static/*.js", "web_static/*.svg"]
 
+[tool.setuptools.data-files]
+"share/ximalaya-downloader-next/apk-protocol" = [
+    "vendor/apk_protocol/native-signer.jar",
+    "vendor/apk_protocol/libc++_shared.so",
+    "vendor/apk_protocol/liblogin_encrypt.so",
+    "vendor/apk_protocol/libnativelib.so",
+    "vendor/apk_protocol/libencrypt.so",
+    "vendor/apk_protocol/manifest.json",
+]
+"share/ximalaya-downloader-next/apk-protocol/assets" = ["vendor/apk_protocol/assets/na.czl"]
+"share/ximalaya-downloader-next/apk-protocol/assets/drawable" = ["vendor/apk_protocol/assets/drawable/x_m.png"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

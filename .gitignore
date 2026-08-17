@@ -39,6 +39,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+!vendor/apk_protocol/*.so
 
 # 打包与分发
 build/

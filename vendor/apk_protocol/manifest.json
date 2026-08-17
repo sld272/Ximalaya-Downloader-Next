@@ -1,0 +1,15 @@
+{
+  "protocol": "ximalaya-android-apk",
+  "apk_version": "9.5.1.3",
+  "abi": "arm64-v8a",
+  "java_min": 17,
+  "files": {
+    "native-signer.jar": "035264b3a66c0c581bb59f32fc4b094bd767945acfc48def7bc5dccd8a81fd5a",
+    "libc++_shared.so": "3e6d529147ffd66bd31fab85c8902b526abd1c06e43554ce64b97519e255e4b3",
+    "libencrypt.so": "06bb61e6c55f42c79fddd5460dc3d7bad899fb598320d52df468205b3f527e44",
+    "liblogin_encrypt.so": "f7cc584fccf5341557c89ad009ab4f0c4e10c713501d61d2f697c97889aa90be",
+    "libnativelib.so": "d80478260a9f6f3adb9f0916999501e1d52cf7c58506df0577b90965ff860ead",
+    "assets/na.czl": "e3302e023616e1a4df27662b882b2d11fb28271bd12907d944a3deda38e51832",
+    "assets/drawable/x_m.png": "74970b84f6e92442aa13fb31a00c9e3ea762f4f0d28fbea60f2febf5f1df50b4"
+  }
+}
