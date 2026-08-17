@@ -46,6 +46,14 @@ WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验�
 
 `Settings.source_backend` 默认是 `http`。
 
+### 3.5 APK 协议可选音源
+
+`source_backend=apk` 装配独立的 `ApkSource + ApkMediaSink`。APK 登录、设备身份、XUID、`x-tk` 和下载 URL 解密由 Java/Unidbg sidecar 提供，运行数据位于 `~/.xdl/apk/`，与浏览器身份完全隔离。
+
+APK 下载清单只用于取得授权 trackId 和元数据；每个待下载 track 都通过 `mobile/download/v2/track/{trackId}` 单独获取本次连接。用例通过可选 `QualityAwareSource`/`TrackResolvingMediaSink` capability 分派进入 APK 路径，原 HTTP、PC 和 Chrome Source 以及 `FileSink` 的调用保持不变。APK sink 为 CDN 添加 `requestType: download`，恢复 `.part` 前重新解析连接，连接失效时最多刷新一次。
+
+native bundle 与 APK 版本绑定，启动时校验清单和 SHA-256；只有选择 APK 后端才会检查 Java/资产并启动 sidecar。
+
 ### 3.1 登录态
 
 `xdl login` 通过 `ChromeSource.interactive_login()` 打开专用浏览器（Chrome 或 Edge；同为 Chromium，CDP 行为一致，由 `Settings.browser` 决定，`auto` 时 Chrome 优先）。验证分两步：

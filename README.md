@@ -158,6 +158,20 @@ xdl --source-backend pc album <链接或ID>
 
 登录方式与默认后端一致：先 `xdl login` 保存会话，之后直接下载即可。日常批量下载时解析更稳定，WebUI 也可在设置页「音源后端」中切换。
 
+## Android APK 协议后端
+
+APK 9.5.1.3 协议作为独立可选后端提供，不读取或修改 WEB/PC 后端的浏览器 Profile、Cookie、签名或下载逻辑：
+
+```bash
+xdl --source-backend apk web
+```
+
+在 WebUI 设置中把「音源后端」切换为「Android APK 协议」，保存后点击顶部登录状态，完成 GeeTest 4 与短信验证码登录。APK 身份独立保存在 `~/.xdl/apk/`。
+
+APK 整专下载会先取得授权曲目清单，然后对每一集分别生成 `x-tk`、请求一次最新下载连接并立即下载。连接不会写入 SQLite 或跨集缓存；`.part` 恢复时也会重新获取该集连接。媒体连接返回 `401/403/404` 时会作废旧连接并最多刷新一次。
+
+该后端需要 Java 17+，随附的版本绑定 native bundle 位于 `vendor/apk_protocol/`，启动时会按 `manifest.json` 校验 SHA-256。可以通过 `Settings.apk_*` 字段覆盖 Java、JAR、`.so`、asset 与状态路径。
+
 ## 本地数据
 
 默认用户数据位于 `~/.xdl`：
@@ -170,6 +184,7 @@ xdl --source-backend pc album <链接或ID>
 | `edge-profile/` `edge-cookies.json` `edge-device-info.json` | 同上，Edge 身份（选用 Edge 时） |
 | `tasks.db` | 下载任务、进度和恢复状态 |
 | `risk-events.jsonl` | 最小化请求结果观测（供 `risk-report`），不含 Cookie 或播放 URL |
+| `apk/device.json` `apk/xuid.json` `apk/auth.json` | APK 独立设备身份与登录态；`auth.json` 权限为 `0600` |
 
 Profile、Cookie 缓存与设备信息共同构成**一份身份**，三者必须同源于同一个浏览器，因此统一按浏览器分文件保存。从旧版本升级时，`cookies.json` 与 `device-info.json` 会在首次运行时自动改名为 `chrome-*`，登录态不受影响。
 
