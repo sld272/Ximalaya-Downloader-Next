@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from ..domain import Track, Album, DownloadTask, TaskState
+from ..domain import Track, Album, DownloadTask, TaskState, Quality
 
 
 @dataclass(frozen=True)
@@ -93,10 +93,24 @@ class Source(Protocol):
 
 
 @runtime_checkable
+class QualityAwareSource(Protocol):
+    """可按目标音质直接解析单曲；当前仅 APK Source 实现。"""
+    async def get_track_for_quality(self, track_id: str, quality: Quality) -> Track: ...
+
+
+@runtime_checkable
 class MediaSink(Protocol):
     """输出：把 URL 落盘（含进度回报、原子落盘）。"""
     def write(self, url: str, target_path: str, reporter: "ProgressReporter",
               cancel=None, progress_sink=None, expected_total: int = 0) -> None: ...
+
+
+@runtime_checkable
+class TrackResolvingMediaSink(Protocol):
+    """需要 track 上下文管理短生命周期 URL 的 sink；当前仅 APK 使用。"""
+    def write_track(self, url: str, track_id: str, quality: Quality,
+                    target_path: str, reporter: "ProgressReporter", cancel=None,
+                    progress_sink=None, expected_total: int = 0) -> None: ...
 
 
 @runtime_checkable
@@ -110,6 +124,7 @@ class TaskStore(Protocol):
     def record_progress(self, task_id: int, bytes_done: int, total: int) -> None: ...
     def requeue_stale(self) -> int: ...
     def requeue_retryable_failed(self) -> int: ...
+    def requeue_failed_category(self, category: str) -> int: ...
     def pending_albums(self) -> list[tuple[str, str, int]]: ...
     def pending_tasks(self, album_id: str) -> list[DownloadTask]: ...
     def query_tasks(self, *, state: TaskState | None = None, search: str = "",

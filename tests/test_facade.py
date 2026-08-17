@@ -69,6 +69,121 @@ def test_login_does_not_construct_task_store(tmp_path):
     assert app.login() == "/tmp/xdl-profile"
 
 
+def test_apk_login_success_requeues_auth_failures():
+    class LoginSource(FakeSource):
+        def verify_sms(self, code):
+            assert code == "123456"
+            return {"backend": "apk", "authenticated": True, "uid": "100"}
+
+    class Store:
+        def __init__(self):
+            self.closed = False
+
+        def requeue_failed_category(self, category):
+            assert category == "auth"
+            return 3
+
+        def close(self):
+            self.closed = True
+
+    store = Store()
+    app = Facade(LoginSource(), FakeSink(), Settings(source_backend="apk"),
+                 store_factory=lambda: store)
+
+    result = app.verify_login_sms("123456")
+
+    assert result["authenticated"] is True
+    assert result["requeued_auth_tasks"] == 3
+    assert store.closed is True
+    assert app._store is None
+
+
+def test_apk_password_login_success_requeues_auth_failures():
+    class LoginSource(FakeSource):
+        def login_password(self, account, password, mode, fds_otp):
+            assert (account, password, mode) == (
+                "listener@example.com", "secret", "email",
+            )
+            assert fds_otp == {"lot_number": "lot"}
+            return {"backend": "apk", "authenticated": True, "uid": "100"}
+
+    class Store:
+        def __init__(self):
+            self.closed = False
+
+        def requeue_failed_category(self, category):
+            assert category == "auth"
+            return 2
+
+        def close(self):
+            self.closed = True
+
+    store = Store()
+    app = Facade(LoginSource(), FakeSink(), Settings(source_backend="apk"),
+                 store_factory=lambda: store)
+
+    result = app.login_password(
+        "listener@example.com", "secret", "email", {"lot_number": "lot"},
+    )
+
+    assert result["requeued_auth_tasks"] == 2
+    assert store.closed is True
+    assert app._store is None
+
+
+def test_apk_facade_switches_and_deletes_saved_accounts():
+    class AccountSource(FakeSource):
+        def switch_account(self, uid):
+            return {"backend": "apk", "authenticated": True, "uid": uid}
+
+        def delete_account(self, uid):
+            return {"backend": "apk", "authenticated": False,
+                    "uid": "", "deleted": uid}
+
+    app = Facade(AccountSource(), FakeSink(), Settings(source_backend="apk"))
+
+    assert app.switch_account("200")["uid"] == "200"
+    assert app.delete_account("200")["deleted"] == "200"
+
+
+def test_apk_resume_requeues_existing_auth_failures_when_already_logged_in(monkeypatch):
+    class LoggedInSource(FakeSource):
+        def auth_status(self):
+            return {"backend": "apk", "authenticated": True, "uid": "100"}
+
+    class Store:
+        def __init__(self):
+            self.categories = []
+
+        def requeue_failed_category(self, category):
+            self.categories.append(category)
+            return 2
+
+    class ResumeStub:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def execute(self, _reporter):
+            return []
+
+    class Reporter:
+        def __init__(self):
+            self.messages = []
+
+        def note(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr("xdl.application.facade.ResumeUseCase", ResumeStub)
+    store = Store()
+    reporter = Reporter()
+    app = Facade(LoggedInSource(), FakeSink(), Settings(source_backend="apk"),
+                 store=store)
+
+    assert app.resume(reporter=reporter) == []
+    assert store.categories == ["auth"]
+    assert reporter.messages == ["APK 已登录，已恢复 2 个鉴权失败任务。"]
+
+
 def test_track_tolerates_broken_store(tmp_path):
     from xdl.errors import StorageError
 

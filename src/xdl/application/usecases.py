@@ -18,9 +18,11 @@ from typing import Awaitable, Callable, TypeVar
 
 from ..domain import (Track, Album, AlbumTrack, DownloadTask, Quality, NamingPolicy,
                       parse_track_id, parse_album_id)
-from ..errors import (XdlError, AuthError, ApiError, CancelledByUser,
+from ..errors import (XdlError, AuthError, ConsecutiveFailureError,
+                      LoginRequiredError, ApiError, CancelledByUser,
                       RiskControlError)
-from ..ports import Source, MediaSink, ProgressReporter, TaskStore
+from ..ports import (Source, QualityAwareSource, MediaSink,
+                     TrackResolvingMediaSink, ProgressReporter, TaskStore)
 
 _EXTS = (".m4a", ".mp3")
 _T = TypeVar("_T")
@@ -29,6 +31,30 @@ _T = TypeVar("_T")
 def _note(reporter: ProgressReporter | None, msg: str) -> None:
     if reporter is not None:
         reporter.note(msg)
+
+
+async def _get_track(source: Source, track_id: str, quality: Quality) -> Track:
+    """APK 可按音质单次解析；旧 Source 保持原 get_track 调用。"""
+    if isinstance(source, QualityAwareSource):
+        return await source.get_track_for_quality(track_id, quality)
+    return await source.get_track(track_id)
+
+
+async def _write_media(sink: MediaSink, *, url: str, track_id: str,
+                       quality: Quality, target_path: str, reporter,
+                       cancel=None, progress_sink=None,
+                       expected_total: int = 0) -> None:
+    """APK sink 获得刷新上下文；旧 sink 的参数和调用行为不变。"""
+    if isinstance(sink, TrackResolvingMediaSink):
+        await asyncio.to_thread(
+            sink.write_track, url, track_id, quality, target_path, reporter,
+            cancel, progress_sink, expected_total,
+        )
+        return
+    await asyncio.to_thread(
+        sink.write, url, target_path, reporter, cancel, progress_sink,
+        expected_total,
+    )
 
 
 @dataclass
@@ -130,7 +156,8 @@ async def _await_risk_recovery(source: Source, probe_track_ids: list[str],
             probe_id = candidates[0]
             try:
                 await source.get_track(probe_id)
-                waited = time.monotonic() - started
+                waited = (0.0 if policy.initial_wait <= 0 and attempt == 1
+                          else time.monotonic() - started)
                 _note(reporter, f"  ✓ {label}风控已解除"
                                 f"（等待 {waited:.0f}s），继续下载。")
                 return True, waited
@@ -194,7 +221,7 @@ class DownloadTrackUseCase:
         holder: dict[str, DownloadTask | None] = {"task": None}
 
         async def _do() -> str:
-            track: Track = await self._source.get_track(track_id)
+            track: Track = await _get_track(self._source, track_id, quality)
             play = track.select(quality)
             if not play or not play.url:
                 if track.is_paid and not track.is_authorized:
@@ -208,8 +235,11 @@ class DownloadTrackUseCase:
             holder["task"] = task
             if task is not None and task.id is not None:
                 await self._store_call(reporter, self._store.mark_downloading, task.id)
-            await asyncio.to_thread(self._sink.write, play.url, target_path, reporter,
-                                    self._cancel_event, self._progress_sink(task), 0)
+            await _write_media(
+                self._sink, url=play.url, track_id=track_id, quality=quality,
+                target_path=target_path, reporter=reporter,
+                cancel=self._cancel_event, progress_sink=self._progress_sink(task),
+            )
             if task is not None and task.id is not None:
                 await self._store_call(reporter, self._store.mark_done,
                                        task.id, target_path)
@@ -336,7 +366,12 @@ class DownloadAlbumUseCase:
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
-        self._concurrency = max(1, concurrency)
+        # APK 连续失败按专辑集序计数；并发完成顺序不稳定，因此启用该能力时
+        # 强制串行。未声明此能力的 WEB/PC/Chrome 保持原并发行为。
+        self._concurrency = (
+            1 if int(getattr(source, "max_consecutive_failures", 0)) > 0
+            else max(1, concurrency)
+        )
         self._retry = retry or RetryPolicy()
         self._store = store
         self._stop_event = stop_event
@@ -445,6 +480,22 @@ class DownloadAlbumUseCase:
         failures = await self._run_batch(work, quality, album_dir, width, total,
                                          reporter, result)
 
+        login_failures = [
+            (item, error) for item, error in failures
+            if isinstance(error, LoginRequiredError)
+        ]
+        if login_failures:
+            await self._requeue_items([item for item, _error in login_failures], reporter)
+            _note(reporter, "APK 登录态缺失或已失效，已终止本批次；剩余任务保留待恢复。")
+            raise login_failures[0][1]
+
+        consecutive_failures = [
+            (item, error) for item, error in failures
+            if isinstance(error, ConsecutiveFailureError)
+        ]
+        if consecutive_failures:
+            raise consecutive_failures[0][1]
+
         # 风控不是普通的逐项失败：首个信号出现后整批熔断。若启用了自动恢复，
         # 进入「等待 → 单探针 → 解除后继续」循环（解除后按原并发继续剩余项，
         # 期间可能再次风控则继续循环）；否则维持原语义，禁止失败收尾轮自动
@@ -514,10 +565,20 @@ class DownloadAlbumUseCase:
         sem = asyncio.Semaphore(self._concurrency)
         failures: list[tuple[_AlbumWorkItem, XdlError]] = []
         risk_error: list[RiskControlError] = []
+        login_error: list[LoginRequiredError] = []
+        max_consecutive = int(getattr(self._source, "max_consecutive_failures", 0))
+        consecutive = 0
+        consecutive_error: list[ConsecutiveFailureError] = []
 
         async def worker(item: _AlbumWorkItem) -> None:
+            nonlocal consecutive
             async with sem:
                 at = item.track
+                if login_error:
+                    failures.append((item, login_error[0]))
+                    return
+                if consecutive_error:
+                    return
                 if risk_error:
                     failures.append((item, RiskControlError(
                         f"风控熔断：未继续请求（起因：{risk_error[0]}）",
@@ -537,6 +598,7 @@ class DownloadAlbumUseCase:
                     path = await self._resolve(item, quality, album_dir, width,
                                                reporter, label)
                     result.downloaded.append(path)
+                    consecutive = 0
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_done,
                                                item.task.id, path)
@@ -545,6 +607,12 @@ class DownloadAlbumUseCase:
                     await self._requeue_items([item], reporter)
                     _note(reporter, f"  ↷ {label} — 已停止，保留待恢复")
                 except XdlError as e:
+                    if isinstance(e, LoginRequiredError):
+                        if not login_error:
+                            login_error.append(e)
+                            _note(reporter, f"  ✗ {label} — {e}；终止本批次")
+                        failures.append((item, e))
+                        return
                     if isinstance(e, RiskControlError) and not risk_error:
                         risk_error.append(e)
                     if item.task and item.task.id is not None:
@@ -554,6 +622,16 @@ class DownloadAlbumUseCase:
                     if not isinstance(e, RiskControlError):
                         _note(reporter, f"  ✗ {label} — {e}")
                     failures.append((item, e))
+                    if max_consecutive and not isinstance(e, RiskControlError):
+                        consecutive += 1
+                        if consecutive >= max_consecutive and not consecutive_error:
+                            stop = ConsecutiveFailureError(
+                                f"APK 连续 {consecutive} 集下载失败，已终止本批次"
+                                f"（最后错误：{e}）。"
+                            )
+                            consecutive_error.append(stop)
+                            failures.append((item, stop))
+                            _note(reporter, f"  ■ {stop} 后续任务保留待恢复。")
 
         await asyncio.gather(*(worker(item) for item in work))
         return failures
@@ -601,7 +679,7 @@ class DownloadAlbumUseCase:
     async def _download_one(self, at, quality, album_dir, width,
                             task: DownloadTask | None = None) -> str:
         self._raise_if_stopping()
-        track = await self._source.get_track(at.track_id)
+        track = await _get_track(self._source, at.track_id, quality)
         self._raise_if_stopping()
         play = track.select(quality)
         if not play or not play.url:
@@ -612,9 +690,12 @@ class DownloadAlbumUseCase:
                                                index=at.index, index_width=width)
         target_path = os.path.join(album_dir, filename)
         # 下载放线程池：多集下载并行、且不挡住事件循环里的解析
-        await asyncio.to_thread(self._sink.write, play.url, target_path, None,
-                                self._cancel_event, self._progress_sink(task),
-                                task.total_bytes if task else 0)
+        await _write_media(
+            self._sink, url=play.url, track_id=at.track_id, quality=quality,
+            target_path=target_path, reporter=None, cancel=self._cancel_event,
+            progress_sink=self._progress_sink(task),
+            expected_total=task.total_bytes if task else 0,
+        )
         return target_path
 
     def _progress_sink(self, task: DownloadTask | None):
@@ -691,9 +772,11 @@ class ResumeUseCase:
             risk_recovery=self._risk_recovery,
         )
         results: list[AlbumResult] = []
+        _note(reporter, "正在初始化音源会话并准备首个待恢复任务…")
         await self._source.open()
         try:
             for album_index, (album_id, title, _count) in enumerate(albums):
+                _note(reporter, f"正在恢复专辑《{title}》…")
                 tasks = await self._store_call(reporter, self._store.pending_tasks,
                                                album_id, default=[])
                 if not tasks:

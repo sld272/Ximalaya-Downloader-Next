@@ -223,9 +223,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
     parser.add_argument("--browser", choices=["auto", "chrome", "edge"],
                         help="登录/采集所用浏览器：auto（默认，Chrome 优先、Edge 兜底）")
-    parser.add_argument("--source-backend", choices=["chrome", "http", "pc"],
+    parser.add_argument("--source-backend", choices=["chrome", "http", "pc", "apk"],
                         help="在线音源后端：http（默认，本地 xm-sign）/ "
-                             "chrome（兼容回退：CDP 接管浏览器，跟随 --browser 选择）")
+                             "chrome（兼容回退）/ apk（Android APK 协议）")
     parser.add_argument(
         "--concurrency", type=_positive_int, metavar="N",
         help="专辑下载/恢复的异步并发数（默认 1；提高可能触发平台风控）",

@@ -125,9 +125,17 @@ class WebRuntime:
 
     def bootstrap(self) -> dict:
         tasks = self.tasks_snapshot()
+        login = (self._facade.auth_status()
+                 if self._settings.source_backend == "apk"
+                 else login_cache_status(self._settings))
+        if self._settings.source_backend == "apk":
+            login = {**login, "browser": "", "browser_name": "APK",
+                     "cache_exists": bool(login.get("authenticated")),
+                     "profile_exists": True,
+                     "other_browser_authenticated": None}
         return {
             "settings": settings_dict(self._settings),
-            "login": login_cache_status(self._settings),
+            "login": login,
             "operation": self.operation_snapshot(include_result=False),
             "tasks": tasks["tasks"],
             "counts": tasks["counts"],
@@ -223,6 +231,41 @@ class WebRuntime:
             path = self._facade.login()
             return {"profile_path": path}
         return self._start("login", "登录", False, run)
+
+    def apk_auth_status(self) -> dict:
+        return self._facade.auth_status()
+
+    def apk_login_config(self) -> dict:
+        return self._facade.login_config()
+
+    def apk_send_sms(self, mobile: str, fds_otp: dict) -> dict:
+        return self._facade.send_login_sms(mobile, fds_otp)
+
+    def apk_verify_sms(self, code: str) -> dict:
+        return self._apk_auth_mutation(self._facade.verify_login_sms, code)
+
+    def apk_login_password(self, account: str, password: str, mode: str,
+                           fds_otp: dict) -> dict:
+        return self._apk_auth_mutation(
+            self._facade.login_password, account, password, mode, fds_otp,
+        )
+
+    def apk_logout(self) -> dict:
+        return self._apk_auth_mutation(self._facade.logout)
+
+    def apk_switch_account(self, uid: str) -> dict:
+        return self._apk_auth_mutation(self._facade.switch_account, uid)
+
+    def apk_delete_account(self, uid: str) -> dict:
+        return self._apk_auth_mutation(self._facade.delete_account, uid)
+
+    def _apk_auth_mutation(self, method: Callable, *args) -> dict:
+        with self._lock:
+            if self._operation and self._operation["status"] == "running":
+                raise OperationBusyError(
+                    "有下载或恢复操作正在运行，请停止或等待完成后再切换 APK 账号。"
+                )
+            return method(*args)
 
     def start_download(self, *, mode: str, target: str,
                        quality: str | None = None,

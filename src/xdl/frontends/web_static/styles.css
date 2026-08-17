@@ -1148,6 +1148,210 @@ input::placeholder {
   gap: 10px;
 }
 
+#apk-login-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+#apk-login-dialog.is-captcha-hidden {
+  display: none;
+}
+
+.apk-login-intro {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.apk-account-section {
+  margin: 0 0 18px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.apk-account-heading,
+.apk-account-row,
+.apk-account-actions {
+  display: flex;
+  align-items: center;
+}
+
+.apk-account-heading {
+  justify-content: space-between;
+  margin-bottom: 9px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.apk-account-heading span,
+.apk-account-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.apk-account-list {
+  display: grid;
+  gap: 7px;
+}
+
+.apk-account-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.apk-account-row {
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: var(--surface);
+}
+
+.apk-account-row.is-active {
+  border-color: #bfded8;
+  background: var(--teal-soft);
+}
+
+.apk-account-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.apk-account-uid {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apk-account-actions {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.apk-account-actions button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.apk-login-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin: 0 0 18px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.apk-login-tabs button {
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 3px);
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.apk-login-tabs button.is-active {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.apk-login-fields {
+  display: grid;
+  gap: 16px;
+}
+
+.apk-login-field {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.apk-login-field input {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-weight: 400;
+}
+
+.apk-login-field input:focus {
+  border-color: var(--teal);
+  outline: 3px solid var(--teal-soft);
+}
+
+.apk-sms-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.apk-sms-help {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.apk-sms-help.is-verified {
+  color: var(--teal);
+  font-weight: 650;
+}
+
+.apk-login-message {
+  min-height: 38px;
+  margin: 18px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.apk-login-message[data-type="success"] {
+  border-color: #bfded8;
+  color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.apk-login-message[data-type="warning"] {
+  border-color: #ead7a1;
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.apk-login-message[data-type="error"] {
+  border-color: #e8c0c0;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.apk-login-message[data-type="loading"] {
+  color: var(--teal);
+}
+
 .empty-state {
   display: grid;
   justify-items: center;

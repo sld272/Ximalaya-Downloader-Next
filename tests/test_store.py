@@ -86,6 +86,23 @@ def test_requeue_stale_and_retryable_failed(tmp_path):
         store.close()
 
 
+def test_requeue_failed_category_after_auth_recovers(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        auth, api = store.upsert_pending([
+            _task("1", index=1), _task("2", index=2),
+        ])
+        store.mark_failed(auth.id, "auth", "请先登录", False)
+        store.mark_failed(api.id, "api", "已下架", False)
+
+        assert store.requeue_failed_category("auth") == 1
+        assert [task.track_id for task in store.pending_tasks("a")] == ["1"]
+        failed = store.query_tasks(state=TaskState.FAILED)
+        assert [task.track_id for task in failed.tasks] == ["2"]
+    finally:
+        store.close()
+
+
 def test_done_task_ignores_late_failure_update(tmp_path):
     store = SqliteTaskStore(str(tmp_path / "tasks.db"))
     try:
@@ -140,7 +157,7 @@ def test_query_tasks_pages_filters_searches_and_counts(tmp_path):
         store.mark_downloading(tasks[2].id)
 
         first = store.query_tasks(limit=2)
-        assert [task.track_id for task in first.tasks] == ["5", "4"]
+        assert [task.track_id for task in first.tasks] == ["3", "2"]
         assert first.total == 5
         assert first.offset == 0
         assert first.limit == 2
@@ -161,6 +178,11 @@ def test_query_tasks_pages_filters_searches_and_counts(tmp_path):
         searched = store.query_tasks(search="100%")
         assert searched.total == 1
         assert [task.track_id for task in searched.tasks] == ["5"]
+
+        # 状态刚更新的旧任务应回到第一页，不能被创建时的旧 id 固定在深页。
+        store.mark_done(tasks[0].id, "/tmp/one-again.mp3")
+        refreshed = store.query_tasks(limit=2)
+        assert refreshed.tasks[0].track_id == "1"
     finally:
         store.close()
 

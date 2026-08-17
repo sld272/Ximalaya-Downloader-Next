@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#f6f8fa">
   <title>XDL · 下载任务</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=apk-login-8">
 </head>
 <body>
   <div class="app-shell">
@@ -65,6 +65,10 @@
             <p class="page-description">添加你有权访问的专辑或单曲，进度会自动保存。</p>
           </div>
           <div class="heading-actions">
+            <button class="button secondary is-hidden" id="apk-login-button" type="button"
+                    data-action="login">
+              APK 登录
+            </button>
             <button class="button secondary" type="button" data-action="open-downloads">
               打开下载目录
             </button>
@@ -332,7 +336,7 @@
                 <select name="default_quality"><option value="standard">标准</option><option value="high">高</option><option value="low">低</option></select>
               </label>
               <label class="field-row"><span>音源后端</span>
-                <select name="source_backend"><option value="http">HTTP</option><option value="pc">PC 桌面端（推荐）</option><option value="chrome">浏览器 CDP（兼容，跟随浏览器设置）</option></select>
+                <select name="source_backend"><option value="http">HTTP</option><option value="pc">PC 桌面端（推荐）</option><option value="chrome">浏览器 CDP（兼容，跟随浏览器设置）</option><option value="apk">Android APK 协议</option></select>
               </label>
               <label class="field-row"><span>异步并发数</span><input name="max_concurrency" type="number" min="1" max="16" required></label>
             </div>
@@ -437,8 +441,73 @@
     </form>
   </dialog>
 
+  <dialog class="result-dialog" id="apk-login-dialog">
+    <form class="dialog-shell apk-login-shell" id="apk-login-form">
+      <div class="dialog-header">
+        <div><span class="tag">APK 协议</span><h2>登录账号</h2></div>
+        <button class="icon-button" type="button" data-apk-login-close aria-label="关闭">×</button>
+      </div>
+      <div class="dialog-content">
+        <p class="apk-login-intro">APK 登录态独立保存，不会读取或覆盖浏览器 Cookie。</p>
+        <section class="apk-account-section" aria-labelledby="apk-account-list-title">
+          <div class="apk-account-heading">
+            <strong id="apk-account-list-title">已保存账号</strong>
+            <span id="apk-account-count">0 个</span>
+          </div>
+          <div class="apk-account-list" id="apk-account-list"></div>
+        </section>
+        <div class="apk-login-tabs" role="tablist" aria-label="APK 登录方式">
+          <button class="is-active" type="button" data-apk-login-mode="sms" role="tab">短信验证码</button>
+          <button type="button" data-apk-login-mode="mobile" role="tab">手机号密码</button>
+          <button type="button" data-apk-login-mode="email" role="tab">邮箱密码</button>
+        </div>
+        <div class="apk-login-fields" data-apk-login-panel="sms">
+          <label class="apk-login-field" for="apk-mobile">
+            <span>手机号</span>
+            <input id="apk-mobile" autocomplete="tel" inputmode="tel"
+                   placeholder="请输入手机号" required>
+          </label>
+          <div class="apk-sms-row">
+            <button class="button secondary" id="apk-send-sms" type="button">
+              获取短信验证码
+            </button>
+            <span class="apk-sms-help" id="apk-sms-help">点击后完成 GeeTest 安全验证</span>
+          </div>
+          <label class="apk-login-field" for="apk-code">
+            <span>短信验证码</span>
+            <input id="apk-code" inputmode="numeric" autocomplete="one-time-code"
+                   placeholder="请输入短信验证码" minlength="4" maxlength="8">
+          </label>
+        </div>
+        <div class="apk-login-fields is-hidden" data-apk-login-panel="password">
+          <label class="apk-login-field" for="apk-account">
+            <span id="apk-account-label">手机号</span>
+            <input id="apk-account" autocomplete="username"
+                   placeholder="请输入手机号">
+          </label>
+          <label class="apk-login-field" for="apk-password">
+            <span>密码</span>
+            <input id="apk-password" type="password" autocomplete="current-password"
+                   placeholder="请输入密码" maxlength="128">
+          </label>
+          <div class="apk-sms-row">
+            <button class="button secondary" id="apk-password-captcha" type="button">
+              安全验证并登录
+            </button>
+            <span class="apk-sms-help" id="apk-password-help">登录前需要完成 GeeTest 安全验证</span>
+          </div>
+        </div>
+        <p class="apk-login-message" id="apk-login-message" role="status" aria-live="polite"></p>
+      </div>
+      <div class="dialog-actions">
+        <button class="button secondary" type="button" data-apk-login-close>取消</button>
+        <button class="button primary" id="apk-submit-sms" type="submit">登录</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
   <div id="dialog-root"></div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=apk-login-8"></script>
 </body>
 </html>

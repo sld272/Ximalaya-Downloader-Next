@@ -56,6 +56,73 @@ class Facade:
         """打开浏览器登录并保存会话，返回保存路径。"""
         return self._source.interactive_login()
 
+    def auth_status(self) -> dict:
+        method = getattr(self._source, "auth_status", None)
+        if method is None:
+            return {"backend": self._settings.source_backend,
+                    "authenticated": False, "multi_step": False}
+        return method()
+
+    def login_config(self) -> dict:
+        method = getattr(self._source, "login_config", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 协议登录。")
+        return method()
+
+    def send_login_sms(self, mobile: str, fds_otp: dict) -> dict:
+        method = getattr(self._source, "send_sms", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 短信登录。")
+        return method(mobile, fds_otp)
+
+    def verify_login_sms(self, code: str) -> dict:
+        method = getattr(self._source, "verify_sms", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 短信登录。")
+        return self._finish_apk_login(method(code))
+
+    def login_password(self, account: str, password: str, mode: str,
+                       fds_otp: dict) -> dict:
+        method = getattr(self._source, "login_password", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 账号密码登录。")
+        return self._finish_apk_login(method(account, password, mode, fds_otp))
+
+    def _finish_apk_login(self, result: dict) -> dict:
+        """统一持久登录结果后的鉴权失败任务恢复。"""
+        requeued = 0
+        if result.get("authenticated"):
+            store = self._task_store()
+            if store is not None:
+                try:
+                    requeue = getattr(store, "requeue_failed_category", None)
+                    if requeue is not None:
+                        requeued = requeue("auth")
+                finally:
+                    store.close()
+                    if self._store is store:
+                        self._store = None
+        return {**result, "requeued_auth_tasks": requeued}
+
+    def logout(self) -> dict:
+        method = getattr(self._source, "logout", None)
+        if method is None:
+            raise XdlError("当前音源不支持独立登出。")
+        method()
+        return self.auth_status()
+
+    def switch_account(self, uid: str) -> dict:
+        method = getattr(self._source, "switch_account", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 多账号切换。")
+        return method(uid)
+
+    def delete_account(self, uid: str) -> dict:
+        method = getattr(self._source, "delete_account", None)
+        if method is None:
+            raise XdlError("当前音源不支持删除 APK 账号。")
+        return method(uid)
+
     def download_track(self, target: str, quality: str | None = None,
                        reporter=None, cancel: threading.Event | None = None) -> str:
         """下载单个音频，返回落盘路径。`cancel` 供外部触发停止。"""
@@ -136,6 +203,11 @@ class Facade:
             close = getattr(store, "close", None)
             if close is not None:
                 close()
+        source_close = getattr(self._source, "client", None)
+        if source_close is not None:
+            close = getattr(source_close, "close", None)
+            if close is not None:
+                close()
 
     def list_formats(self, target: str) -> dict:
         """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
@@ -200,6 +272,13 @@ class Facade:
         store = self._task_store()
         if store is None:
             return []
+        if self._settings.source_backend == "apk" and \
+                self.auth_status().get("authenticated"):
+            requeue = getattr(store, "requeue_failed_category", None)
+            if requeue is not None:
+                restored = await asyncio.to_thread(requeue, "auth")
+                if restored and reporter is not None:
+                    reporter.note(f"APK 已登录，已恢复 {restored} 个鉴权失败任务。")
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)

@@ -121,6 +121,16 @@ class FakeFacade:
     def login(self):
         return "/tmp/profile"
 
+    def login_password(self, account, password, mode, fds_otp):
+        return {"authenticated": True, "account": account, "password": password,
+                "mode": mode, "fds_otp": fds_otp}
+
+    def switch_account(self, uid):
+        return {"authenticated": True, "uid": uid}
+
+    def delete_account(self, uid):
+        return {"authenticated": False, "uid": "", "deleted": uid}
+
     def list_formats(self, target):
         return {"track_id": target, "title": "测试单曲", "formats": []}
 
@@ -164,6 +174,37 @@ def test_runtime_download_and_task_snapshots(tmp_path):
         "offset": 0, "limit": 100, "total": 2,
         "has_previous": False, "has_next": False,
     }
+
+
+def test_runtime_forwards_apk_password_login(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    result = runtime.apk_login_password(
+        "13800138000", "secret", "mobile", {"lot_number": "lot"},
+    )
+
+    assert result == {
+        "authenticated": True, "account": "13800138000", "password": "secret",
+        "mode": "mobile", "fds_otp": {"lot_number": "lot"},
+    }
+
+
+def test_runtime_switches_apk_account_only_while_idle(tmp_path):
+    facade = FakeFacade()
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    assert runtime.apk_switch_account("200")["uid"] == "200"
+    assert runtime.apk_delete_account("200")["deleted"] == "200"
+
+    runtime._operation = {"status": "running", "label": "恢复全部"}
+    with pytest.raises(OperationBusyError, match="正在运行"):
+        runtime.apk_switch_account("100")
+    with pytest.raises(OperationBusyError, match="正在运行"):
+        runtime.apk_login_password(
+            "13800138000", "secret", "mobile", {"lot_number": "lot"},
+        )
 
 
 def test_runtime_filters_and_pages_task_snapshots(tmp_path):

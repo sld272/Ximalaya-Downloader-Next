@@ -61,11 +61,42 @@ class TaskSelectionRequest(StrictModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
 
 
+class ApkSmsRequest(StrictModel):
+    mobile: str = Field(min_length=6, max_length=18)
+    fds_otp: dict
+
+
+class ApkVerifyRequest(StrictModel):
+    code: str = Field(min_length=4, max_length=8)
+
+
+class ApkPasswordRequest(StrictModel):
+    account: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+    mode: Literal["mobile", "email"]
+    fds_otp: dict
+
+
+class ApkAccountRequest(StrictModel):
+    uid: str = Field(pattern=r"^\d+$", min_length=1, max_length=32)
+
+
 class SettingsUpdate(StrictModel):
     download_dir: str | None = None
     default_quality: Literal["high", "standard", "low"] | None = None
     browser: Literal["auto", "chrome", "edge"] | None = None
-    source_backend: Literal["http", "pc", "chrome"] | None = None
+    source_backend: Literal["http", "pc", "chrome", "apk"] | None = None
+    apk_state_dir: str | None = None
+    apk_java_path: str | None = None
+    apk_signer_jar: str | None = None
+    apk_libcxx_path: str | None = None
+    apk_login_so_path: str | None = None
+    apk_xuid_so_path: str | None = None
+    apk_encrypt_so_path: str | None = None
+    apk_asset_dir: str | None = None
+    apk_request_timeout: float | None = Field(default=None, gt=0, le=300)
+    apk_native_timeout: float | None = Field(default=None, gt=0, le=300)
+    apk_max_consecutive_failures: int | None = Field(default=None, ge=1, le=100)
     max_concurrency: int | None = Field(default=None, ge=1, le=16)
     resolve_timeout: int | None = Field(default=None, ge=1, le=300)
     http_timeout: int | None = Field(default=None, ge=1, le=1800)
@@ -194,6 +225,40 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
     @app.post("/api/operations/login", status_code=202)
     def login():
         return service.start_login()
+
+    @app.get("/api/apk-auth/status")
+    def apk_auth_status():
+        return service.apk_auth_status()
+
+    @app.get("/api/apk-auth/config")
+    def apk_login_config():
+        return service.apk_login_config()
+
+    @app.post("/api/apk-auth/sms")
+    def apk_send_sms(body: ApkSmsRequest):
+        return service.apk_send_sms(body.mobile, body.fds_otp)
+
+    @app.post("/api/apk-auth/verify")
+    def apk_verify_sms(body: ApkVerifyRequest):
+        return service.apk_verify_sms(body.code)
+
+    @app.post("/api/apk-auth/password")
+    def apk_login_password(body: ApkPasswordRequest):
+        return service.apk_login_password(
+            body.account, body.password, body.mode, body.fds_otp,
+        )
+
+    @app.post("/api/apk-auth/logout")
+    def apk_logout():
+        return service.apk_logout()
+
+    @app.post("/api/apk-auth/switch")
+    def apk_switch_account(body: ApkAccountRequest):
+        return service.apk_switch_account(body.uid)
+
+    @app.post("/api/apk-auth/accounts/delete")
+    def apk_delete_account(body: ApkAccountRequest):
+        return service.apk_delete_account(body.uid)
 
     @app.post("/api/operations/download", status_code=202)
     def download(body: DownloadRequest):

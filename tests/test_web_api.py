@@ -76,6 +76,19 @@ class FakeRuntime:
     def start_login(self):
         return {"id": "2", "status": "running"}
 
+    def apk_login_password(self, account, password, mode, fds_otp):
+        self.calls.append(("apk_password", account, password, mode, fds_otp))
+        return {"backend": "apk", "authenticated": True,
+                "requeued_auth_tasks": 2}
+
+    def apk_switch_account(self, uid):
+        self.calls.append(("apk_switch", uid))
+        return {"backend": "apk", "authenticated": True, "uid": uid}
+
+    def apk_delete_account(self, uid):
+        self.calls.append(("apk_delete", uid))
+        return {"backend": "apk", "authenticated": False, "uid": ""}
+
     def start_resume(self):
         return {"id": "3", "status": "running"}
 
@@ -137,6 +150,26 @@ def test_webui_static_shell_is_served():
     assert 'name="experiment_require_identity_change"' in page.text
     assert 'name="experiment_rebirth_rounds"' in page.text
     assert 'id="task-pagination"' in page.text
+    assert 'id="apk-login-button"' in page.text
+    assert 'data-apk-login-mode="sms"' in page.text
+    assert 'data-apk-login-mode="mobile"' in page.text
+    assert 'data-apk-login-mode="email"' in page.text
+    assert 'id="apk-password"' in page.text
+    assert 'id="apk-account-list"' in page.text
+    assert "requireApkLogin()" in script.text
+    assert "loadGeetestSdk()" in script.text
+    assert "startApkSmsCooldown" in script.text
+    assert "✓ 安全验证成功" in script.text
+    assert "requeued_auth_tasks" in script.text
+    assert "hideApkLoginForCaptcha()" in script.text
+    assert "restoreApkLoginAfterCaptcha()" in script.text
+    assert 'api("/api/apk-auth/password"' in script.text
+    assert 'addEventListener("click", apkPasswordLogin)' in script.text
+    assert '"/api/apk-auth/switch"' in script.text
+    assert '"/api/apk-auth/accounts/delete"' in script.text
+    assert 'classList.add("is-captcha-hidden")' in script.text
+    assert "dialog.show();" in script.text
+    assert 'data-xdl-geetest' not in page.text
     assert "window.setInterval(refreshRuntime, 850)" not in script.text
     assert "document.hidden" in script.text
     assert "javascript" in script.headers["content-type"]
@@ -156,6 +189,51 @@ def test_web_api_rejects_invalid_download_shape():
         })
 
     assert response.status_code == 422
+
+
+def test_web_api_forwards_apk_password_login_and_validates_shape():
+    runtime = FakeRuntime()
+    payload = {
+        "account": "listener@example.com",
+        "password": "secret",
+        "mode": "email",
+        "fds_otp": {"lot_number": "lot"},
+    }
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/api/apk-auth/password", json=payload)
+        invalid_mode = client.post(
+            "/api/apk-auth/password", json={**payload, "mode": "username"},
+        )
+        extra = client.post(
+            "/api/apk-auth/password", json={**payload, "remember": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["requeued_auth_tasks"] == 2
+    assert ("apk_password", "listener@example.com", "secret", "email",
+            {"lot_number": "lot"}) in runtime.calls
+    assert invalid_mode.status_code == 422
+    assert extra.status_code == 422
+
+
+def test_web_api_switches_and_deletes_apk_accounts_with_strict_uid():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        switched = client.post("/api/apk-auth/switch", json={"uid": "200"})
+        deleted = client.post(
+            "/api/apk-auth/accounts/delete", json={"uid": "100"},
+        )
+        invalid = client.post("/api/apk-auth/switch", json={"uid": "abc"})
+        extra = client.post(
+            "/api/apk-auth/switch", json={"uid": "200", "force": True},
+        )
+
+    assert switched.json()["uid"] == "200"
+    assert deleted.status_code == 200
+    assert ("apk_switch", "200") in runtime.calls
+    assert ("apk_delete", "100") in runtime.calls
+    assert invalid.status_code == 422
+    assert extra.status_code == 422
 
 
 def test_web_api_forwards_bounded_task_query_and_light_operation_snapshot():

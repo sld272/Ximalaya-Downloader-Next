@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _chunks(items: list, size: int):
@@ -367,6 +367,22 @@ class SqliteTaskStore:
             return int(cur.rowcount)
 
     @_wrap_sqlite_errors
+    def requeue_failed_category(self, category: str) -> int:
+        """在外部条件恢复后重排同类失败，例如重新登录后的 auth 任务。"""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE download_task
+                SET state=?, retryable=0, last_error_code='', last_error_msg='',
+                    updated_at=?
+                WHERE state=? AND last_error_code=?
+                """,
+                (TaskState.PENDING.value, _now(), TaskState.FAILED.value,
+                 str(category)),
+            )
+            return int(cur.rowcount)
+
+    @_wrap_sqlite_errors
     def pending_albums(self) -> list[tuple[str, str, int]]:
         with self._lock:
             rows = self._conn.execute(
@@ -454,7 +470,7 @@ class SqliteTaskStore:
                 offset = ((total - 1) // limit) * limit
             rows = self._conn.execute(
                 f"SELECT * FROM download_task{clause} "
-                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
 
@@ -486,7 +502,8 @@ class SqliteTaskStore:
         clause, params = self._scope_clause(state, search, album_id)
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT id FROM download_task{clause} ORDER BY id DESC LIMIT ?",
+                f"SELECT id FROM download_task{clause} "
+                "ORDER BY updated_at DESC, id DESC LIMIT ?",
                 (*params, cap),
             ).fetchall()
         return [int(r["id"]) for r in rows]

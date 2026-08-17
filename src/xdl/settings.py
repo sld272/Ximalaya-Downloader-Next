@@ -7,6 +7,7 @@ MVP 给保守默认值；环境变量/命令行覆盖等留待后续。
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from .config import paths, platform
@@ -59,6 +60,19 @@ class Settings:
     # "pc"（PC 桌面端接口：play/v1/show + track/quality，解析链路更简单）
     # "chrome"（兼容后端：由浏览器页面完成请求，仅用于回退与诊断）
     source_backend: str = "http"
+
+    # ---- APK 9.5.1.3 协议后端（仅 source_backend="apk" 时使用）----
+    apk_state_dir: str = ""       # 默认 ~/.xdl/apk
+    apk_java_path: str = "java"
+    apk_signer_jar: str = ""
+    apk_libcxx_path: str = ""
+    apk_login_so_path: str = ""
+    apk_xuid_so_path: str = ""
+    apk_encrypt_so_path: str = ""
+    apk_asset_dir: str = ""
+    apk_request_timeout: float = 30.0
+    apk_native_timeout: float = 30.0
+    apk_max_consecutive_failures: int = 3
     # xm-sign 设备指纹 JSON（默认 ~/.xdl/{browser}-device-info.json）；
     # 不存在时回退到内置模板。
     device_info_path: str = ""
@@ -136,6 +150,32 @@ class Settings:
             self.task_db_path = os.path.join(_xdl_home(), "tasks.db")
         if not self.risk_log_path:
             self.risk_log_path = os.path.join(_xdl_home(), "risk-events.jsonl")
+        if not self.apk_state_dir:
+            self.apk_state_dir = os.path.join(_xdl_home(), "apk")
+        source_vendor = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "vendor", "apk_protocol"
+        ))
+        installed_vendor = os.path.join(
+            sys.prefix, "share", "ximalaya-downloader-next", "apk-protocol"
+        )
+        vendor = (source_vendor if os.path.isdir(source_vendor)
+                  else installed_vendor)
+        if not self.apk_signer_jar:
+            self.apk_signer_jar = os.path.join(vendor, "native-signer.jar")
+        if not self.apk_libcxx_path:
+            self.apk_libcxx_path = os.path.join(vendor, "libc++_shared.so")
+        if not self.apk_login_so_path:
+            self.apk_login_so_path = os.path.join(vendor, "liblogin_encrypt.so")
+        if not self.apk_xuid_so_path:
+            self.apk_xuid_so_path = os.path.join(vendor, "libnativelib.so")
+        if not self.apk_encrypt_so_path:
+            self.apk_encrypt_so_path = os.path.join(vendor, "libencrypt.so")
+        if not self.apk_asset_dir:
+            self.apk_asset_dir = os.path.join(vendor, "assets")
+        if self.apk_request_timeout <= 0 or self.apk_native_timeout <= 0:
+            raise ConfigError("APK 请求和 native 超时必须大于 0。")
+        if self.apk_max_consecutive_failures < 1:
+            raise ConfigError("APK 连续失败熔断阈值必须大于 0。")
         if self.risk_poll_initial_wait < 0:
             raise ConfigError("风控轮询首次等待不能为负数。")
         if self.risk_poll_backoff_factor < 1:

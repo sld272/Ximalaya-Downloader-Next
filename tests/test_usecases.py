@@ -12,6 +12,7 @@ from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase
                                       ResumeUseCase, RetryPolicy,
                                       RiskRecoveryPolicy)
 from xdl.errors import (NetworkError, AuthError, ApiError, CancelledByUser,
+                        ConsecutiveFailureError, DownloadLimitError,
                         RiskControlError)
 
 # 退避/冷却全置 0，测试不真正 sleep
@@ -170,6 +171,70 @@ def test_album_non_retryable_stays_failed(tmp_path):
     res = run(uc.execute("123", Quality.STANDARD))
     assert len(res.failed) == 1
     assert src.calls["1"] == 1
+
+
+def test_apk_three_consecutive_failures_abort_batch_and_keep_later_pending(tmp_path):
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = FakeSource(album, behavior={
+        "1": [DownloadLimitError("已超过体验会员下载上限")],
+        "2": [AuthError("无权")],
+        "3": [ApiError("接口拒绝")],
+    })
+    src.max_consecutive_failures = 3
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        uc = DownloadAlbumUseCase(
+            src, FakeSink(), str(tmp_path / "downloads"), concurrency=1,
+            retry=RetryPolicy(max_attempts=1, backoff_base=0, cooldown=0,
+                              global_rounds=0),
+            store=store,
+        )
+
+        with pytest.raises(ConsecutiveFailureError, match="连续 3 集下载失败"):
+            run(uc.execute("123", Quality.STANDARD))
+
+        rows = _db_rows(db)
+        assert [(row["track_id"], row["state"]) for row in rows] == [
+            ("1", "failed"), ("2", "failed"), ("3", "failed"),
+            ("4", "pending"), ("5", "pending"),
+        ]
+        assert rows[0]["last_error_code"] == "download_limit"
+        assert rows[0]["retryable"] == 0
+        assert src.calls == {"1": 1, "2": 1, "3": 1}
+    finally:
+        store.close()
+
+
+def test_apk_consecutive_failure_breaker_forces_serial_order(tmp_path):
+    src = FakeSource(_one_track_album())
+    src.max_consecutive_failures = 3
+
+    uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=8)
+
+    assert uc._concurrency == 1
+
+
+def test_apk_success_resets_consecutive_failure_count(tmp_path):
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = FakeSource(album, behavior={
+        "1": [ApiError("失败1")], "2": [ApiError("失败2")],
+        "4": [ApiError("失败3")], "5": [ApiError("失败4")],
+    })
+    src.max_consecutive_failures = 3
+    uc = DownloadAlbumUseCase(
+        src, FakeSink(), str(tmp_path), concurrency=1,
+        retry=RetryPolicy(max_attempts=1, backoff_base=0, cooldown=0,
+                          global_rounds=0),
+    )
+
+    result = run(uc.execute("123", Quality.STANDARD))
+
+    assert len(result.downloaded) == 1
+    assert len(result.failed) == 4
+    assert src.calls == {str(i): 1 for i in range(1, 6)}
 
 
 def test_album_rate_limit_is_retryable(tmp_path):

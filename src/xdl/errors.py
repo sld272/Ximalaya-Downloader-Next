@@ -21,6 +21,20 @@ class AuthError(XdlError):
     category = "auth"
 
 
+class LoginRequiredError(AuthError):
+    """会话缺失或已失效；继续请求同一批次没有意义。"""
+
+
+class DownloadLimitError(AuthError):
+    """账号级下载额度已耗尽。"""
+    category = "download_limit"
+
+
+class ConsecutiveFailureError(XdlError):
+    """APK 批次连续失败达到阈值；停止继续请求后续曲目。"""
+    category = "consecutive_failures"
+
+
 class SignError(XdlError):
     """签名生成失败，通常可重试。"""
     retryable = True
