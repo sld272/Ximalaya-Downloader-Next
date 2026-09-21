@@ -361,6 +361,68 @@ def test_apk_download_stage_risk_control_breaks_batch(tmp_path):
     assert src.order == ["1", "2"]    # 风控后 3/4/5 零次解析请求
 
 
+def test_apk_risk_during_jitter_window_stops_next_resolve(tmp_path, monkeypatch):
+    """P2 复现：并发下载时，下一集已通过熔断检查、正在错峰等待，此时
+    上一集下载（含 APK sink 刷 URL）撞风控——等待结束后必须重查熔断，
+    不能继续请求受保护接口。"""
+    from xdl.application import usecases as uc_mod
+    monkeypatch.setattr(uc_mod.random, "uniform", lambda a, b: 0.3)
+
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 3)]
+    album = Album("123", "专辑", total=2, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    class _RiskSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            if url.endswith("/1.mp3"):
+                raise RiskControlError("风控拦截", ret=3005)
+            super().write(url, path, reporter, cancel, progress_sink,
+                          expected_total)
+
+    uc = DownloadAlbumUseCase(src, _RiskSink(), str(tmp_path), concurrency=2,
+                              retry=RetryPolicy(max_attempts=1, backoff_base=0,
+                                                cooldown=0, global_rounds=0))
+    res = run(uc.execute("123", Quality.STANDARD))
+
+    assert src.order == ["1"]     # 第 2 集在风控信号后零次解析
+    assert res.risk_control is not None
+
+
+def test_file_sink_stale_url_retries_with_re_resolve(tmp_path):
+    """P2 复现：非 APK 通道（FileSink 无自刷新）遇失效链接时，下载重试
+    必须重新解析拿新 URL（拆分前的行为），而不是对旧地址重试到底。"""
+    class _UrlSource(FakeSource):
+        """每次解析返回递增 URL：第 1 个是失效地址，第 2 个有效。"""
+
+        def __init__(self, album):
+            super().__init__(album)
+            self.resolves = 0
+
+        async def get_track(self, track_id):
+            self.resolves += 1
+            self.calls[track_id] = self.calls.get(track_id, 0) + 1
+            url = f"http://x/{track_id}-v{self.resolves}.mp3"
+            return Track(track_id=track_id, title=f"t{track_id}",
+                         play_urls=[PlayUrl("MP3_64", url)])
+
+    class _StaleUrlSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            if "-v1" in url:
+                raise NetworkError("HTTP 403: 链接已失效")
+            super().write(url, path, reporter, cancel, progress_sink,
+                          expected_total)
+
+    src = _UrlSource(_one_track_album())
+    uc = DownloadAlbumUseCase(src, _StaleUrlSink(), str(tmp_path), retry=FAST)
+    res = run(uc.execute("123", Quality.STANDARD))
+
+    assert len(res.downloaded) == 1 and not res.failed
+    assert src.calls["1"] == 2     # 首次解析 + 重试时重新解析
+
+
 def test_apk_download_stage_login_required_terminates_batch(tmp_path):
     """下载阶段登录态失效：终止批次并 requeue，剩余任务可恢复。"""
     tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]

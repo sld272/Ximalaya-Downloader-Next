@@ -646,6 +646,14 @@ class DownloadAlbumUseCase:
             label = f"[{at.index}/{total}] {at.title}"
             async with window:
                 async with resolve_sem:
+                    if self._is_stopping():
+                        return
+                    await asyncio.sleep(random.uniform(0, 0.3))   # 轻微错峰
+                    if self._is_stopping():
+                        return
+                    # 错峰等待期间，其他集可能在下载阶段（含 APK sink 刷
+                    # URL）撞风控/登录态——请求受保护接口前必须重查熔断，
+                    # 否则解耦后下一集会在风控信号之后继续冲击。
                     if login_error:
                         failures.append((item, login_error[0]))
                         return
@@ -656,11 +664,6 @@ class DownloadAlbumUseCase:
                             f"风控熔断：未继续请求（起因：{risk_error[0]}）",
                             ret=risk_error[0].ret,
                         )))
-                        return
-                    if self._is_stopping():
-                        return
-                    await asyncio.sleep(random.uniform(0, 0.3))   # 轻微错峰
-                    if self._is_stopping():
                         return
                     try:
                         if item.task and item.task.id is not None:
@@ -675,10 +678,26 @@ class DownloadAlbumUseCase:
                         await _handle_error(item, label, e, count_consecutive=True)
                         return
                 # 解析信号量已释放：下载不占用它，后续集的解析可立即开始。
+                first_attempt = True
+
+                async def _attempt_write() -> str:
+                    nonlocal first_attempt
+                    if isinstance(self._sink, TrackResolvingMediaSink):
+                        # APK sink 自带 URL 刷新：同一 URL 重试即可。
+                        return await self._write_one(resolved)
+                    if first_attempt:
+                        first_attempt = False
+                        return await self._write_one(resolved)
+                    # FileSink 不会刷新链接：失效链接只能靠重试时重新解析
+                    # 恢复（拆分前的行为）。重解析是受保护请求，回解析闸。
+                    async with resolve_sem:
+                        fresh = await self._resolve_one(item, quality,
+                                                        album_dir, width)
+                    return await self._write_one(fresh)
+
                 try:
                     path = await _run_with_retry(
-                        lambda: self._write_one(resolved),
-                        self._retry, reporter, label=f"{label} ")
+                        _attempt_write, self._retry, reporter, label=f"{label} ")
                     result.downloaded.append(path)
                     if item.task and item.task.id is not None:
                         await self._store_call(reporter, self._store.mark_done,
