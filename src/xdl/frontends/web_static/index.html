@@ -338,7 +338,7 @@
               <label class="field-row"><span>音源后端</span>
                 <select name="source_backend"><option value="http">HTTP</option><option value="pc">PC 桌面端（推荐）</option><option value="chrome">浏览器 CDP（兼容，跟随浏览器设置）</option><option value="apk">Android APK 协议</option></select>
               </label>
-              <label class="field-row"><span>异步并发数<br><small>作用于 CDN 下载；受保护解析保持串行</small></span><input name="max_concurrency" type="number" min="1" max="16" required></label>
+              <label class="field-row"><span>异步并发数<br><small>下载并发生效；APK 后端解析保持串行</small></span><input name="max_concurrency" type="number" min="1" max="16" required></label>
             </div>
           </section>
 

@@ -241,8 +241,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "chrome（兼容回退）/ apk（Android APK 协议）")
     parser.add_argument(
         "--concurrency", type=_positive_int, metavar="N",
-        help="专辑下载/恢复的异步并发数（默认 1；并发作用于匿名 CDN 下载，"
-             "受保护解析仍串行）",
+        help="专辑下载/恢复的异步并发数（默认 1；下载并发生效，"
+             "APK 后端受保护解析保持串行）",
     )
     parser.add_argument(
         "--experiment-rotate-device",
