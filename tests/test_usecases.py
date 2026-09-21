@@ -74,7 +74,7 @@ class FakeSource:
 
 def test_album_usecase_defaults_to_single_concurrency(tmp_path):
     uc = DownloadAlbumUseCase(FakeSource(), FakeSink(), str(tmp_path))
-    assert uc._concurrency == 1
+    assert (uc._resolve_concurrency, uc._download_concurrency) == (1, 1)
 
 
 def test_track_retry_then_success(tmp_path):
@@ -192,7 +192,7 @@ def test_apk_three_consecutive_failures_abort_batch_and_keep_later_pending(tmp_p
             store=store,
         )
 
-        with pytest.raises(ConsecutiveFailureError, match="连续 3 集下载失败"):
+        with pytest.raises(ConsecutiveFailureError, match="连续 3 集解析失败"):
             run(uc.execute("123", Quality.STANDARD))
 
         rows = _db_rows(db)
@@ -213,11 +213,12 @@ def test_apk_consecutive_failure_breaker_forces_serial_order(tmp_path):
 
     uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=8)
 
-    assert uc._concurrency == 1
+    # 熔断计数依赖集序，解析必须串行；但下载不受限，并发保持用户值。
+    assert (uc._resolve_concurrency, uc._download_concurrency) == (1, 8)
 
 
 def test_forced_serial_download_is_announced_when_user_asked_for_more(tmp_path):
-    """用户显式传了并发却被强制降为 1 时，必须通过 reporter 告知——不能静默。"""
+    """用户显式传了并发时必须通过 reporter 告知解析仍是串行——不能静默。"""
     src = FakeSource(_one_track_album())
     src.max_consecutive_failures = 3
     notes = []
@@ -229,7 +230,7 @@ def test_forced_serial_download_is_announced_when_user_asked_for_more(tmp_path):
     uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=8)
     run(uc.execute("123", Quality.STANDARD, reporter=_Reporter()))
 
-    assert any("降为 1" in note for note in notes)
+    assert any("解析需串行" in note for note in notes)
 
 
 def test_serial_download_not_announced_when_user_did_not_ask_for_more(tmp_path):
@@ -245,7 +246,7 @@ def test_serial_download_not_announced_when_user_did_not_ask_for_more(tmp_path):
     uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=1)
     run(uc.execute("123", Quality.STANDARD, reporter=_Reporter()))
 
-    assert not any("降为 1" in note for note in notes)
+    assert not any("解析需串行" in note for note in notes)
 
 
 def test_apk_success_resets_consecutive_failure_count(tmp_path):
@@ -267,6 +268,180 @@ def test_apk_success_resets_consecutive_failure_count(tmp_path):
     assert len(result.downloaded) == 1
     assert len(result.failed) == 4
     assert src.calls == {str(i): 1 for i in range(1, 6)}
+
+
+class _OrderSource(FakeSource):
+    """记录 get_track 调用顺序，用于断言 APK 解析严格按集序。"""
+
+    def __init__(self, album):
+        super().__init__(album)
+        self.order: list[str] = []
+
+    async def get_track(self, track_id):
+        self.order.append(track_id)
+        return await super().get_track(track_id)
+
+
+def test_apk_concurrent_download_keeps_resolve_order(tmp_path):
+    """APK 并发下载：解析仍严格按集序（熔断计数前提），全部落盘。"""
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=4,
+                              retry=FAST)
+    res = run(uc.execute("123", Quality.STANDARD))
+
+    assert len(res.downloaded) == 5 and not res.failed
+    assert src.order == [str(i) for i in range(1, 6)]
+
+
+def test_apk_download_window_bounded_by_concurrency(tmp_path):
+    """窗口信号量：任意时刻「已解析未完成下载」≤ 下载并发——窗口满后
+    后续集的解析被挡住，受保护接口节奏仍然有界。"""
+    import threading
+
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    gate = threading.Event()
+
+    class _GatedSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            self.writes.append((url, path))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not gate.wait(timeout=5):
+                raise AssertionError("下载闸门未释放，测试超时")
+            open(path, "w").close()
+
+    sink = _GatedSink()
+
+    async def scenario():
+        uc = DownloadAlbumUseCase(src, sink, str(tmp_path), concurrency=2,
+                                  retry=FAST)
+        task = asyncio.create_task(uc.execute("123", Quality.STANDARD))
+        await asyncio.sleep(0.5)   # 让 1、2 集解析完并阻塞在下载里
+        assert src.order == ["1", "2"]      # 窗口已满，第 3 集解析未开始
+        gate.set()
+        return await asyncio.wait_for(task, timeout=5)
+
+    res = run(scenario())
+    assert len(res.downloaded) == 5 and not res.failed
+    assert src.order == [str(i) for i in range(1, 6)]
+
+
+def test_apk_download_stage_risk_control_breaks_batch(tmp_path):
+    """下载阶段（含 APK sink 刷 URL 路径）撞风控也必须熔断整批：
+    后续集零次解析请求，已解析集正常落盘。"""
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    class _RiskSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            if url.endswith("/1.mp3"):
+                super().write(url, path, reporter, cancel, progress_sink,
+                              expected_total)
+                return
+            raise RiskControlError("风控拦截", ret=3005)
+
+    uc = DownloadAlbumUseCase(src, _RiskSink(), str(tmp_path), concurrency=1,
+                              retry=FAST)
+    res = run(uc.execute("123", Quality.STANDARD))
+
+    assert len(res.downloaded) == 1
+    assert res.risk_control is not None
+    assert res.deferred == 4
+    assert src.order == ["1", "2"]    # 风控后 3/4/5 零次解析请求
+
+
+def test_apk_download_stage_login_required_terminates_batch(tmp_path):
+    """下载阶段登录态失效：终止批次并 requeue，剩余任务可恢复。"""
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    class _LoginSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            if url.endswith("/1.mp3"):
+                super().write(url, path, reporter, cancel, progress_sink,
+                              expected_total)
+                return
+            from xdl.errors import LoginRequiredError
+            raise LoginRequiredError("登录态已失效")
+
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        uc = DownloadAlbumUseCase(src, _LoginSink(), str(tmp_path / "downloads"),
+                                  concurrency=1, retry=FAST, store=store)
+        with pytest.raises(Exception, match="登录态已失效"):
+            run(uc.execute("123", Quality.STANDARD))
+        rows = _db_rows(db)
+        states = {row["track_id"]: row["state"] for row in rows}
+        assert states["1"] == "done"
+        assert states["2"] == "pending"     # requeue 待恢复
+        assert src.order == ["1", "2"]
+    finally:
+        store.close()
+
+
+def test_apk_download_failures_do_not_count_consecutive(tmp_path):
+    """匿名 CDN 下载连续失败不计入熔断：走普通逐项失败，不触发
+    ConsecutiveFailureError（熔断保护的是受保护解析端点的配额）。"""
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+
+    uc = DownloadAlbumUseCase(src, _FailSink(), str(tmp_path), concurrency=1,
+                              retry=RetryPolicy(max_attempts=1, backoff_base=0,
+                                                cooldown=0, global_rounds=0))
+    res = run(uc.execute("123", Quality.STANDARD))
+
+    assert len(res.failed) == 5 and not res.downloaded
+    assert all(src.calls[str(i)] == 1 for i in range(1, 6))
+
+
+def test_apk_download_stop_does_not_hang(tmp_path):
+    """下载中请求停止：不悬挂，未完成项保留待恢复。"""
+    import threading
+
+    tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
+    album = Album("123", "专辑", total=5, tracks=tracks)
+    src = _OrderSource(album)
+    src.max_consecutive_failures = 3
+    gate = threading.Event()
+
+    class _GatedCancelSink(FakeSink):
+        def write(self, url, path, reporter, cancel=None, progress_sink=None,
+                  expected_total=0):
+            self.writes.append((url, path))
+            gate.wait(timeout=5)
+            raise CancelledByUser("stop")
+
+    sink = _GatedCancelSink()
+
+    async def scenario():
+        stop = asyncio.Event()
+        uc = DownloadAlbumUseCase(src, sink, str(tmp_path), concurrency=2,
+                                  retry=FAST, stop_event=stop)
+        task = asyncio.create_task(uc.execute("123", Quality.STANDARD))
+        await asyncio.sleep(0.5)
+        stop.set()
+        gate.set()
+        return await asyncio.wait_for(task, timeout=5)
+
+    res = run(scenario())
+    assert not res.downloaded and not res.failed
 
 
 def test_album_rate_limit_is_retryable(tmp_path):

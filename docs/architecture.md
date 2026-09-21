@@ -138,7 +138,7 @@ native 算法（`create_xuid`、`ticket`/`x-tk`、登录参数 `sign`、`encrypt
 
 `prefer_python=False` 的 Java/Unidbg sidecar 路径保留下来，仅用于协议升级时与官方 `.so` 做差分比对：官方库由使用者自行从已授权安装的 APK 提取（清单与比对用 SHA-256 见 `vendor/apk_protocol/README.md`），`native_signer/` 的 Java 源码可 `mvn package` 自建。sidecar 启动前逐项校验资产清单与 SHA-256，缺清单或指纹不符即拒绝启动。
 
-下载清单只用于取得授权 trackId 和元数据；每个待下载 track 都通过 `mobile/download/v2/track/{trackId}` 单独获取本次连接，连接不写入 SQLite、也不跨集缓存。用例通过可选 `QualityAwareSource`/`TrackResolvingMediaSink` capability 分派进入 APK 路径，HTTP、PC、Chrome 三个 Source 与 `FileSink` 的调用保持不变。`ApkMediaSink` 为 CDN 添加 `requestType: download`，恢复 `.part` 前重新解析连接，连接失效时最多刷新一次。
+下载清单只用于取得授权 trackId 和元数据；每个待下载 track 都通过 `mobile/download/v2/track/{trackId}` 单独获取本次连接，连接不写入 SQLite、也不跨集缓存。用例通过可选 `QualityAwareSource`/`TrackResolvingMediaSink` capability 分派进入 APK 路径，HTTP、PC、Chrome 三个 Source 与 `FileSink` 的调用保持不变。`ApkMediaSink` 为 CDN 添加 `requestType: download`，恢复 `.part` 前重新解析连接，连接失效时最多刷新一次。`mobile/download/*` 端点有配额：`ApkSource.resolve_track_sync` 内置串行闸，解析路径与 sink 的 URL 刷新路径共用，下载并发不会放大成对受保护接口的并发冲击。
 
 ## 4. 任务与恢复
 
@@ -146,9 +146,8 @@ native 算法（`create_xuid`、`ticket`/`x-tk`、登录参数 `sign`、`encrypt
 
 - 打开/关闭一次音源会话。
 - 将专辑曲目写入 SQLite 任务库。
-- 按 `max_concurrency` 有界调度；默认值为 `1`，CLI 可通过全局参数
-  `--concurrency N` 覆盖。
-- 将可重试失败按类型退避，将风控错误升级为批次熔断；风控作为单个批次事件汇总一次，其余受影响任务保留待恢复。
+- 受保护解析与匿名 CDN 下载分两个阶段调度：解析并发由 resolve 信号量限定（`max_concurrency`；APK 因按集序计数连续失败而恒为串行），下载并发不受解析限制；窗口信号量限定「已解析未完成下载」的在途数（= 下载并发，URL 不滞留）。CLI 可通过全局参数 `--concurrency N` 覆盖。
+- 将可重试失败按类型退避，将风控错误升级为批次熔断（解析与下载两个阶段都会检查，因为 APK sink 在下载线程里刷 URL 走的也是受保护接口）；风控作为单个批次事件汇总一次，其余受影响任务保留待恢复。APK 连续失败熔断只在解析阶段计数——匿名 CDN 下载失败走逐项重试与失败收尾轮。
 - 可选的风控自动恢复（`Settings.risk_poll_enabled`，默认关闭）：熔断后进入「等待 → 单探针 → 解除后按原并发继续」循环，等待期间不发请求，每个退避周期只发一个探针（对真实待下载曲目调一次受保护接口）；探针遇 AuthError 等不可等待错误会停止，超时或被用户停止时回落为熔断语义，任务保留待人工 resume。
 - 传播用户停止信号并保留未完成任务。
 

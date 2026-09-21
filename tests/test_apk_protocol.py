@@ -623,3 +623,41 @@ def test_apk_source_without_recorder_stays_silent(tmp_path):
 
     assert album.tracks == []
     assert not list(tmp_path.iterdir())
+
+
+def test_apk_source_resolve_track_is_serialized_across_threads():
+    """解析与下载线程里的 URL 刷新共用同一道串行闸：并发调用
+    resolve_track_sync 时受保护接口上最多一个请求在途。"""
+    import threading
+    import time
+
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    class SlowClient:
+        uid, token = "7", "t"
+
+        def resolve_track(self, track_id, quality):
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return {"url": f"http://x/{track_id}.mp3", "title": "t",
+                    "file_size": 1, "is_paid": False}
+
+    source = ApkSource(SlowClient())
+    threads = [
+        threading.Thread(target=source.resolve_track_sync,
+                         args=(str(i), Quality.STANDARD))
+        for i in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert max_in_flight == 1

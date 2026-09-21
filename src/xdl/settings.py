@@ -46,10 +46,11 @@ class Settings:
     # 它不是认证或风控恢复手段；若保留作历史诊断，只能显式启用并自行验证结果。
     reset_device_fingerprint: bool = False
 
-    # 受保护播放信息解析默认串行；2026-07-11 实测 K=4 已触发 3005。
+    # 下载并发（作用于匿名 CDN 下载）；受保护解析默认串行——
+    # 2026-07-11 实测解析 K=4 已触发 3005，APK 通道解析恒为串行。
     max_concurrency: int = 1
 
-    # 错误分级退避重试（见 errors.py / 架构 §8.3）
+    # 错误分级退避重试（见 errors.py / 架构 §5「错误模型」）
     max_attempts: int = 3              # 单任务即时重试上限
     retry_backoff_base: float = 1.5    # 网络/签名类退避基数（秒）
     cooldown: float = 30.0             # 限流(1001)类冷却（秒）

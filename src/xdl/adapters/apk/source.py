@@ -22,6 +22,10 @@ class ApkSource:
         self._session_id = str(uuid.uuid4())
         self._request_index = 0
         self._index_lock = threading.Lock()
+        # mobile/download/* 端点有配额；解析路径与下载线程里的 URL 刷新路径
+        # （ApkMediaSink 失效重解析）都必须过这道串行闸，否则下载并发会
+        # 放大成对受保护接口的并发冲击。
+        self._resolve_lock = threading.Lock()
 
     def _next_index(self) -> int:
         with self._index_lock:
@@ -73,8 +77,9 @@ class ApkSource:
         return await asyncio.to_thread(self.resolve_track_sync, track_id, quality)
 
     def resolve_track_sync(self, track_id: str, quality: Quality) -> Track:
-        value = self._guarded(str(track_id), self.client.resolve_track,
-                              str(track_id), quality.value)
+        with self._resolve_lock:
+            value = self._guarded(str(track_id), self.client.resolve_track,
+                                  str(track_id), quality.value)
         kind = "M4A_64" if ".m4a" in value["url"].lower() else "MP3_64"
         return Track(track_id=str(track_id), title=value["title"],
                      play_urls=[PlayUrl(kind, value["url"], value["file_size"])],
